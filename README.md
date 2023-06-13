@@ -1,2 +1,2 @@
 # snacc
- Super nibbly and comfy compiler
+Super nibbly and comfy compiler
