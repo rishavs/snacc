@@ -1,4 +1,5 @@
 import { Context } from './defs'
+import { genC99 } from './generator';
 import { lexFile } from './lexer'
 import { parseFile } from './parser';
 
@@ -28,19 +29,23 @@ export const transpileFile = async (filepath: string) => {
 
     parseFile(ctx)
 
-    // if (ctx.errors.length > 0) {
-    //     console.error("Error: Parsing failed");
-    //     console.error(ctx.errors)
+    if (ctx.errors.length > 0) {
+        console.error("Error: Parsing failed");
+        console.error(ctx.errors)
 
-    //     return false
-    // }
+        return false
+    }
+
+
+    genC99(ctx.root)
+
     console.log(ctx.errors)
     console.log(ctx.tokens)
     console.log("AST", JSON.stringify(ctx.root, [
         'tokens', 'name', 'start', 'line', 'end', 'errors', 't', 'root', 'type',
         'kind', 'operator', 'value', 'isFloat', 'isQualified', 'isNewDeclaration', 
         'isPublic', 'isMutable', 
-        'statements', 'left', 'right', 'identifier', 'expression'
+        'statements', 'left', 'right', 'identifier', 'expression', 'expressions', 'id'
     ], 4))
     // console.log(ctx)
     return true

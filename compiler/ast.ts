@@ -83,16 +83,16 @@ export class NumberNode extends Node {
         super('NUMBER', start, line);
     }
 }
-export class Int64Node extends Node {
+export class IntNode extends Node {
     value?: string;
     constructor(start: number, line: number) {
-        super('INT64', start, line);
+        super('INT', start, line);
     }
 }
 
-export class Float64Node extends Node {
+export class FloatNode extends Node {
     value?: string;
     constructor(start: number, line: number) {
-        super('FLOAT64', start, line);
+        super('FLOAT', start, line);
     }
 }

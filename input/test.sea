@@ -1,2 +1,2 @@
-let x  .y. z 
-    = 1 + 2
+let x = 3
+exit (x)

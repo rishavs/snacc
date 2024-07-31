@@ -2,7 +2,9 @@ import {
     DeclarationNode, IdentifierNode, NumberNode, 
     FunCallNode,  Node,
     BinaryNode,
-    UnaryNode
+    UnaryNode,
+    IntNode,
+    FloatNode
 } from "./ast";
 import { Context, Token } from "./defs";
 import { MissingSpecificTokenError, MissingSyntaxError, UnclosedDelimiterError } from "./errors";
@@ -218,15 +220,20 @@ export const parseIdentifier = (ctx: Context): IdentifierNode | Error => {
     return node;
 }
 
-export const parseNumber = (ctx: Context): NumberNode | Error => {
+export const parseNumber = (ctx: Context): IntNode | FloatNode | Error => {
     let token = ctx.tokens[ctx.t];
-    if (token.name !== "INT" && token.name !== "FLOAT") {
+    let node : IntNode | FloatNode;
+    if (token.name === 'INT') {
+        node = new IntNode(token.start, token.end);
+        node.value = token.value!;
+        ctx.t++; // consume number
+    } else if (token.name === 'FLOAT') {
+        node = new FloatNode(token.start, token.end);
+        node.value = token.value!;
+        ctx.t++; // consume number
+    } else {
         return new MissingSyntaxError("Number", token.start, token.line);
     }
-    let node = new NumberNode(token.start, token.end);
-    node.value = token.value;
-    node.isFloat = token.name === "FLOAT";
-    ctx.t++; // consume number
     return node;
 }
 

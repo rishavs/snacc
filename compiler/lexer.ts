@@ -54,6 +54,9 @@ export const lexFile = (ctx: Context) => {
             addToken(ctx, "-", ctx.c)
 
         // Operators
+        } else if (ctx.src.startsWith(",", ctx.c)) {
+            addToken(ctx, ",", ctx.c)
+
         } else if (ctx.src.startsWith(".", ctx.c)) {
             addToken(ctx, ".", ctx.c)
 
