@@ -4,26 +4,25 @@ import { Node, RootNode, FunCallNode, IntNode, FloatNode, DeclarationNode,
     UnaryNode
 } from "./ast";
 
-export const genC99 = async (ast: RootNode) => {
+export const genC99Files = async (ast: RootNode) => {
     let cMainFile = './oven/main.c';
     let cHeaderFile = './oven/main.h';
 
-    let cMainContent = genRoot(ast);
+    let cMainContent = genC99MainSource(ast);
     let mainBytes = await Bun.write(cMainFile, cMainContent);
     let headerBytes = await Bun.write(cHeaderFile, `#include <stdio.h>\n`);
     console.log(`Wrote ${mainBytes} bytes to ${cMainFile}`);
     console.log(`Wrote ${headerBytes} bytes to ${cHeaderFile}`);
 }
 
-export const genRoot = (ast: RootNode): string => {
+export const genC99MainSource = (ast: RootNode): string => {
     let indentLevel = 1;
     let indent = '    '.repeat(indentLevel); // Using 4 spaces for indentation
     let stmts = ast.statements.map(
         statement => `${indent}${genStatement(statement, indentLevel)};`
     ).join('\n');
     
-    return /*c99*/`
-int main() {
+    return /*c99*/`int main() {
 ${stmts}
     return 0;
 }`
@@ -54,7 +53,7 @@ const genExpr = (expr: Node, indentLevel: number): string => {
         return genIdentifier(expr);
     } else if (expr instanceof GroupedExprNode) {
         return genGroupedExpr(expr, indentLevel);
-        
+
     } else if (expr instanceof BinaryNode) {
         return genBinaryExpr(expr, indentLevel);
     } else if (expr instanceof UnaryNode) {

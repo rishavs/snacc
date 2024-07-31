@@ -1,5 +1,5 @@
 import { Context } from './defs'
-import { genC99 } from './generator';
+import { genC99Files } from './generator';
 import { lexFile } from './lexer'
 import { parseFile } from './parser';
 
@@ -36,8 +36,7 @@ export const transpileFile = async (filepath: string) => {
         return false
     }
 
-
-    genC99(ctx.root)
+    genC99Files(ctx.root)
 
     console.log(ctx.errors)
     console.log(ctx.tokens)
