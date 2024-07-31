@@ -1,10 +1,7 @@
 import { 
-    DeclarationNode, IdentifierNode, NumberNode, 
-    FunCallNode,  Node,
-    BinaryNode,
-    UnaryNode,
-    IntNode,
-    FloatNode
+    DeclarationNode, IdentifierNode, FunCallNode, Node, BinaryNode,
+    UnaryNode, IntNode, FloatNode,
+    GroupedExprNode
 } from "./ast";
 import { Context, Token } from "./defs";
 import { MissingSpecificTokenError, MissingSyntaxError, UnclosedDelimiterError } from "./errors";
@@ -58,7 +55,7 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
     let identifier = parseIdentifier(ctx);
     if (identifier instanceof Error) return identifier;
     
-    decl.identifier = identifier;
+    decl.id = identifier;
     if (ctx.tokens[ctx.t].name === "=") {
         // Handle assignment
         ctx.t++; // consume '='
@@ -81,9 +78,7 @@ export const parseUnaryExpr = (ctx: Context): Node | Error => {
         ctx.t++; // consume '-'
         let expr = parsePrimaryExpr(ctx);
         if (expr instanceof Error) return expr;
-        let unary =  new UnaryNode(token.start, token.line);
-        unary.operator = token.name;
-        unary.right = expr;
+        let unary =  new UnaryNode(token.start, token.line, token.name, expr);
         expr.parent = unary;
         return unary;
     } else {
@@ -119,10 +114,7 @@ export const parseBinaryExpr = (ctx: Context, precedence = 0): Node | Error => {
         let right = parseBinaryExpr(ctx, tokenPrecedence);
         if (right instanceof Error) return right;
 
-        let node: BinaryNode = new BinaryNode(left.start, left.line);
-        node.operator = token.name;
-        node.left = left;
-        node.right = right;
+        let node: BinaryNode = new BinaryNode(left.start, left.line, token.name, left, right);
         node.end = right.end;
         left = node;
     }
@@ -148,18 +140,32 @@ export const parsePrimaryExpr = (ctx: Context): Node | Error => {
         return parseDeclarationStmt(ctx);
 
     } else if (token.name === "(") {
-        ctx.t++; // consume '('
-        let expr = parseExpression(ctx);
-        if (expr instanceof Error) return expr;
-        if (ctx.tokens[ctx.t].name !== ")") {
-            return new MissingSpecificTokenError('grouped expression', ')', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
-        }
-        ctx.t++; // consume ')'
-        return expr;
+        return parseGroupedExpr(ctx);
 
     } else {
         return new MissingSyntaxError("expression", token.start, token.line);
     }
+}
+
+export const parseGroupedExpr = (ctx: Context): GroupedExprNode | Error => {
+    let token = ctx.tokens[ctx.t];
+    if (token.name !== "(") {
+        return new MissingSpecificTokenError('grouped expression', '(', token.start, token.line);
+    }
+    ctx.t++; // consume '('
+
+    // Parse the enclosed expression
+    let expr = parseExpression(ctx);
+    if (expr instanceof Error) return expr;
+
+    // Check for the closing parenthesis ')'
+    token = ctx.tokens[ctx.t];
+    if (token.name !== ")") {
+        return new MissingSpecificTokenError('grouped expression', ')', token.start, token.line);
+    }
+    ctx.t++; // consume ')'
+
+    return new GroupedExprNode(token.start, token.line, expr);
 }
 
 export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
@@ -214,8 +220,7 @@ export const parseIdentifier = (ctx: Context): IdentifierNode | Error => {
     if (token.name !== "IDENTIFIER") {
         return new MissingSyntaxError("Identifier", token.start, token.line);
     }
-    let node = new IdentifierNode(token.start, token.end);
-    node.value = token.value!;
+    let node = new IdentifierNode(token.start, token.end, token.value!);
     ctx.t++; // consume identifier
     return node;
 }
@@ -224,12 +229,10 @@ export const parseNumber = (ctx: Context): IntNode | FloatNode | Error => {
     let token = ctx.tokens[ctx.t];
     let node : IntNode | FloatNode;
     if (token.name === 'INT') {
-        node = new IntNode(token.start, token.end);
-        node.value = token.value!;
+        node = new IntNode(token.start, token.end, token.value!);
         ctx.t++; // consume number
     } else if (token.name === 'FLOAT') {
-        node = new FloatNode(token.start, token.end);
-        node.value = token.value!;
+        node = new FloatNode(token.start, token.end, token.value!);
         ctx.t++; // consume number
     } else {
         return new MissingSyntaxError("Number", token.start, token.line);

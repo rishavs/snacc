@@ -20,7 +20,7 @@ export class RootNode extends Node {
 }
 
 export class FunCallNode extends Node {
-    id?: IdentifierNode;
+    id!: IdentifierNode;
     expressions?: Node[];
     constructor(start: number, line: number) {
         super('FUNCALL', start, line);
@@ -38,10 +38,11 @@ export class FunCallStmtNode extends Node {
 }
 
 export class DeclarationNode extends Node {
-    isMutable?: boolean;
-    isPublic?: boolean;
-    isNewDeclaration?: boolean;
-    identifier?: IdentifierNode;
+    isMutable?: boolean = false;
+    isPublic?: boolean = false;
+    isNewDeclaration: boolean = false;
+
+    id!: IdentifierNode;
     expression?: Node;
     constructor(start: number, line: number) {
         super('DECLARE', start, line);
@@ -52,47 +53,57 @@ export class DeclarationNode extends Node {
 // Expressions
 // ---------------------------
 export class UnaryNode extends Node {
-    operator?: string;
-    right?: Node;
-    constructor(start: number, line: number) {
+    operator: string;
+    right: Node;
+    constructor(start: number, line: number, operator: string, right: Node) {
         super('UNARY', start, line);
+        this.operator = operator;
+        this.right = right;
     }
 }
 
 export class BinaryNode extends Node {
-    operator?: string;
-    left?: Node;
-    right?: Node;
-    constructor(start: number, line: number) {
+    operator: string;
+    left: Node;
+    right: Node;
+    constructor(start: number, line: number, operator: string, left: Node, right: Node) {
         super('BINARY', start, line);
+        this.operator = operator;
+        this.left = left;
+        this.right = right;
+    }
+}
+
+export class GroupedExprNode extends Node {
+    expression: Node;
+    constructor(start: number, line: number, expr: Node) {
+        super('GROUPED', start, line);
+        this.expression = expr;
     }
 }
 
 export class IdentifierNode extends Node {
-    isQualified?: boolean;
-    value?: string;
-    constructor(start: number, line: number) {
+    isQualified: boolean = false
+    value!: string;
+    constructor(start: number, line: number, value: string) {
         super('IDENTIFIER', start, line);
+        this.value = value;
     }
 }
 
-export class NumberNode extends Node {
-    value?: string;
-    isFloat?: boolean;
-    constructor(start: number, line: number) {
-        super('NUMBER', start, line);
-    }
-}
+
 export class IntNode extends Node {
-    value?: string;
-    constructor(start: number, line: number) {
+    value: string;
+    constructor(start: number, line: number, value: string) {
         super('INT', start, line);
+        this.value = value;
     }
 }
 
 export class FloatNode extends Node {
-    value?: string;
-    constructor(start: number, line: number) {
+    value: string;
+    constructor(start: number, line: number, value: string) {
         super('FLOAT', start, line);
+        this.value = value;
     }
 }
