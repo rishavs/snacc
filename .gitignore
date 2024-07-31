@@ -4,3 +4,8 @@ bin/
 *.exe
 *.a
 *.o
+
+node_modules/
+
+bin/
+oven/

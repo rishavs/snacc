@@ -1,1 +1,0 @@
-del /q ".\bin\*" && fpc -FE.\bin -Fucompiler picsel.lpr && cls && .\bin\picsel.exe
