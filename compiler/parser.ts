@@ -7,7 +7,6 @@ import {
     TypeExprNode
 } from "./ast";
 import { builtinTypes, Context, Token } from "./defs";
-import { MissingSpecificTokenError, MissingSyntaxError, UnclosedDelimiterError } from "./errors";
 
 export const parseFile = (ctx: Context) => {
     ctx.t = 0;
@@ -52,7 +51,9 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
     }
         
     if (ctx.tokens[ctx.t].name !== "IDENTIFIER") {
-        return new MissingSpecificTokenError('declaration statement', 'identifier', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+        let err = new Error("Expected an Identifier for the declaration statement at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+        err.name = "SyntaxError"
+        return err;
     }
 
     let identifier = parseIdentifier(ctx);
@@ -61,7 +62,9 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 
     if (ctx.tokens[ctx.t].name !== ":") {
         console.log(ctx.tokens[ctx.t])
-        return new MissingSpecificTokenError('Type information', ':', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+        let err = new Error("Expected a ':' after the identifier for the Type declaration at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+        err.name = "SyntaxError"
+        return err;
     }
     ctx.t++; // consume ':'
     let typeExpr = parseTypeExpression(ctx);
@@ -80,6 +83,9 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 }
 
 // eg. `let x : Int | Dec = 10.2`
+// A type expression is a chain of types separated by either an 'AND' or 'OR' operator
+// A chain can have only operator kind
+// A type expression will not handle anonymous/object types. they should be declared separately
 export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeExprNode | Error => {
     
     let startsWithOpr = false
@@ -127,7 +133,7 @@ export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeExprNo
         }
 
         if (ctx.tokens[ctx.t].name !== "IDENTIFIER") {
-            let err = new Error("Expected a Type declaration at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+            let err = new Error("Expected a Type declaration after the type operator at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
             err.name = "SyntaxError"
             return err;
         }
@@ -215,14 +221,18 @@ export const parsePrimaryExpr = (ctx: Context): Node | Error => {
         return parseGroupedExpr(ctx);
 
     } else {
-        return new MissingSyntaxError("expression", token.start, token.line);
+        let err = new Error("Expected an expression at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
 }
 
 export const parseGroupedExpr = (ctx: Context): GroupedExprNode | Error => {
     let token = ctx.tokens[ctx.t];
     if (token.name !== "(") {
-        return new MissingSpecificTokenError('grouped expression', '(', token.start, token.line);
+        let err = new Error("Expected an opening parenthesis '(' for the grouped expression at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     ctx.t++; // consume '('
 
@@ -233,7 +243,9 @@ export const parseGroupedExpr = (ctx: Context): GroupedExprNode | Error => {
     // Check for the closing parenthesis ')'
     token = ctx.tokens[ctx.t];
     if (token.name !== ")") {
-        return new MissingSpecificTokenError('grouped expression', ')', token.start, token.line);
+        let err = new Error("Expected a closing parenthesis ')' for the grouped expression at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     ctx.t++; // consume ')'
 
@@ -245,14 +257,18 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
     let funCallNode = new FunCallNode(token.start, token.line);
 
     if (token.name !== "IDENTIFIER") {
-        return new MissingSpecificTokenError('function call', 'identifier', token.start, token.line);
+        let err = new Error("Expected an Identifier for the function call at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     let id = parseIdentifier(ctx);
     if (id instanceof Error) return id;
     funCallNode.id = id;
 
     if (ctx.tokens[ctx.t].name !== "(") {
-        return new MissingSpecificTokenError('list of arguments', '(', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+        let err = new Error("Expected an opening parenthesis '(' for the function call at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     ctx.t++; // consume '('
 
@@ -275,12 +291,16 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
 
         if (ctx.tokens[ctx.t].name === ")") break;
         if (ctx.tokens[ctx.t].name !== ",") {
-            return new MissingSpecificTokenError('list of arguments', ',', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+            let err = new Error("Expected a comma ',' for the arguments of function call at Line:" + ctx.line + " & Pos:" + token.start)
+            err.name = "SyntaxError"
+            return err
         }
         ctx.t++; // consume ','
     }
     if (ctx.tokens[ctx.t].name !== ")") {
-        return new UnclosedDelimiterError('list of arguments', ')', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+        let err = new Error("Expected a closing parenthesis ')' for the function call at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     ctx.t++; // consume ')'
 
@@ -290,7 +310,9 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
 export const parseIdentifier = (ctx: Context): IdentifierNode | Error => {
     let token = ctx.tokens[ctx.t];
     if (token.name !== "IDENTIFIER") {
-        return new MissingSyntaxError("Identifier", token.start, token.line);
+        let err = new Error("Expected an Identifier at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     let node = new IdentifierNode(token.start, token.end, token.value!);
     ctx.t++; // consume identifier
@@ -307,7 +329,9 @@ export const parseNumber = (ctx: Context): IntNode | FloatNode | Error => {
         node = new FloatNode(token.start, token.end, token.value!);
         ctx.t++; // consume number
     } else {
-        return new MissingSyntaxError("Number", token.start, token.line);
+        let err = new Error("Expected a Number at Line:" + ctx.line + " & Pos:" + token.start)
+        err.name = "SyntaxError"
+        return err;
     }
     return node;
 }

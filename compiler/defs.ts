@@ -72,3 +72,15 @@ export class Context {
         this.src = src
     }
 }
+
+export class SyntaxError extends Error {
+    constructor(msg: string, pos: number, line: number) {
+        super(`Pos ${pos}, Line ${line} > ${msg}`)
+        this.name = "SyntaxError"
+
+        // Modify the stack trace to exclude the constructor call
+        if (Error.captureStackTrace) {
+            Error.captureStackTrace(this, SyntaxError);
+        }
+    }   
+}
