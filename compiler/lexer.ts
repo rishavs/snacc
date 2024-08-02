@@ -52,7 +52,28 @@ export const lexFile = (ctx: Context) => {
 
         } else if (ctx.src.startsWith("-", ctx.c)) {
             addToken(ctx, "-", ctx.c)
+        
+        // Types
+        } else if (ctx.src.startsWith(":", ctx.c)) {
+            addToken(ctx, ":", ctx.c)
 
+        } else if (ctx.src.startsWith("|", ctx.c)) {
+            addToken(ctx, "|", ctx.c)
+
+        } else if (ctx.src.startsWith("&", ctx.c)) {
+            addToken(ctx, "&", ctx.c)
+
+            
+
+        // } else if (ctx.src.startsWith("Int64", ctx.c)) {
+        //     addToken(ctx, "INT64", ctx.c + 4)
+        
+        // } else if (ctx.src.startsWith("Dec64", ctx.c)) {
+        //     addToken(ctx, "DEC64", ctx.c + 4)
+
+        // } else if (ctx.src.startsWith("Bool", ctx.c)) {
+        //     addToken(ctx, "BOOL", ctx.c + 3)
+            
         // Operators
         } else if (ctx.src.startsWith(",", ctx.c)) {
             addToken(ctx, ",", ctx.c)

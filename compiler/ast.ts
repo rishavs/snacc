@@ -42,10 +42,39 @@ export class DeclarationNode extends Node {
     isPublic?: boolean = false;
     isNewDeclaration: boolean = false;
 
+    typeExpr?: BinaryExpressionTypeNode;
     id!: IdentifierNode;
     expression?: Node;
     constructor(start: number, line: number) {
         super('DECLARE', start, line);
+    }
+}
+
+// ---------------------------
+// Type Expressions
+// ---------------------------
+export class PrimaryTypeNode extends Node {
+    value: string;
+    constructor(start: number, line: number, value: string) {
+        super('PRIMARYTYPE', start, line);
+        this.value = value;
+    }
+}
+
+export class ObjectTypeNode extends Node {
+    properties!: Map<string, BinaryExpressionTypeNode>;
+    constructor(start: number, line: number) {
+        super('OBJECTTYPE', start, line);
+    }
+}
+
+export class BinaryExpressionTypeNode extends Node {
+    left!: PrimaryTypeNode | ObjectTypeNode | BinaryExpressionTypeNode;
+    right?: PrimaryTypeNode | ObjectTypeNode | BinaryExpressionTypeNode;
+    operator?: 'AND' | 'OR';
+    constructor(start: number, line: number) {
+        super('TYPEEXPRESSION', start, line);
+        
     }
 }
 

@@ -1,9 +1,11 @@
 import { 
     DeclarationNode, IdentifierNode, FunCallNode, Node, BinaryNode,
     UnaryNode, IntNode, FloatNode,
-    GroupedExprNode
+    GroupedExprNode,
+    BinaryExpressionTypeNode,
+    PrimaryTypeNode
 } from "./ast";
-import { Context, Token } from "./defs";
+import { builtinTypes, Context, Token } from "./defs";
 import { MissingSpecificTokenError, MissingSyntaxError, UnclosedDelimiterError } from "./errors";
 
 export const parseFile = (ctx: Context) => {
@@ -54,8 +56,16 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 
     let identifier = parseIdentifier(ctx);
     if (identifier instanceof Error) return identifier;
-    
     decl.id = identifier;
+
+    if (ctx.tokens[ctx.t].name !== ":") {
+        return new MissingSpecificTokenError('Type information', ':', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    }
+    ctx.t++; // consume ':'
+    let typeExpr = parseTypeExpression(ctx);
+    if (typeExpr instanceof Error) return typeExpr;
+    decl.typeExpr = typeExpr;
+
     if (ctx.tokens[ctx.t].name === "=") {
         // Handle assignment
         ctx.t++; // consume '='
@@ -65,6 +75,35 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
     } 
     // Only declaration
     return decl
+}
+
+// eg. `let x : Int | Dec = 10.2`
+export const parseTypeExpression = (ctx: Context): BinaryExpressionTypeNode | Error => {
+    if (!Object.keys(builtinTypes).includes(ctx.tokens[ctx.t].name) &&
+        ctx.tokens[ctx.t].name !== 'IDENTIFIER'
+        // && ctx.tokens[ctx.t].name !== '{' // object type
+    ) {
+        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    }
+    let typeExpr =  new BinaryExpressionTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line)
+    typeExpr.left = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
+    ctx.t++; // consume type
+    if (!ctx.tokens[ctx.t] ) {
+        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    }
+    if (ctx.tokens[ctx.t].name !== "|" && ctx.tokens[ctx.t].name !== "&") {
+        return typeExpr
+    }
+    typeExpr.operator = ctx.tokens[ctx.t].value === "|" ? 'OR' : 'AND';
+    ctx.t++; // consume operator
+    if (!ctx.tokens[ctx.t] ) {
+        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    }
+    let right = parseTypeExpression(ctx);
+    if (right instanceof Error) return right;
+
+    typeExpr.right = right;
+    return typeExpr;
 }
 
 export const parseExpression = (ctx: Context): Node | Error => {

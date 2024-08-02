@@ -1,5 +1,41 @@
 import { RootNode } from "./ast"
 
+
+export const builtinTypes = {
+    'Int': 'int64_t',
+    'Dec': 'double',
+    'Bool': 'bool',
+    'Char': 'char', // int8_t
+}
+
+export const keywords = [
+    'let', 'mut', 'pub', 'fn', 'if', 'else', 'while', 'for', 'return', 
+    'break', 'continue', 'true', 'false', 'null', 'type'
+] 
+
+export const operators = [
+    // 2 char Binary operators
+    '==', '!=', '<=', '>=', '&&', '||',  
+
+    // 1 char Binary operators
+    '<', '>', '+', '-', '*', '/', '%',
+    
+    // 2 char Assignment operators
+    '+=', '-=', '*=', '/=', '%=',
+    
+    // 1 char Assignment operators
+    '=', 
+    
+    // Unary operators
+    '!', '=',
+
+    // 2 char Misc operators
+    '->', '=>', 
+    
+    //  1 char Misc operators
+    ':', '|', '&'
+]
+
 export class Token {
     name: string
     value?: string
