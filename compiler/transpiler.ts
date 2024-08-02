@@ -41,11 +41,11 @@ export const transpileFile = async (filepath: string) => {
 
     console.log(ctx.errors)
     console.log("AST", JSON.stringify(ctx.root, [
-        'tokens', 'name', 'start', 'line', 'end', 'errors', 't', 'root', 'type',
+        'tokens', 'name',
         'kind', 'operator', 'value', 'isFloat', 'isQualified', 'isNewDeclaration', 
         'isPublic', 'isMutable', 
         'statements', 'left', 'right', 'identifier', 'expression', 'expressions', 'id',
-        'typeExpr', 'typesList', 'typesOpr'
+        'types', 'declaredType'
     ], 4))
     // console.log(ctx)
     return true

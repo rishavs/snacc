@@ -3,7 +3,8 @@ import {
     UnaryNode, IntNode, FloatNode,
     GroupedExprNode,
     BinaryExpressionTypeNode,
-    PrimaryTypeNode
+    PrimaryTypeNode,
+    TypeExprNode
 } from "./ast";
 import { builtinTypes, Context, Token } from "./defs";
 import { MissingSpecificTokenError, MissingSyntaxError, UnclosedDelimiterError } from "./errors";
@@ -59,12 +60,13 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
     decl.id = identifier;
 
     if (ctx.tokens[ctx.t].name !== ":") {
+        console.log(ctx.tokens[ctx.t])
         return new MissingSpecificTokenError('Type information', ':', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
     }
     ctx.t++; // consume ':'
     let typeExpr = parseTypeExpression(ctx);
     if (typeExpr instanceof Error) return typeExpr;
-    decl.typeExpr = typeExpr;
+    decl.declaredType = typeExpr;
 
     if (ctx.tokens[ctx.t].name === "=") {
         // Handle assignment
@@ -78,31 +80,62 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 }
 
 // eg. `let x : Int | Dec = 10.2`
-export const parseTypeExpression = (ctx: Context): BinaryExpressionTypeNode | Error => {
-    if (!Object.keys(builtinTypes).includes(ctx.tokens[ctx.t].name) &&
-        ctx.tokens[ctx.t].name !== 'IDENTIFIER'
-        // && ctx.tokens[ctx.t].name !== '{' // object type
-    ) {
-        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
-    }
-    let typeExpr =  new BinaryExpressionTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line)
-    typeExpr.left = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
-    ctx.t++; // consume type
-    if (!ctx.tokens[ctx.t] ) {
-        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
-    }
-    if (ctx.tokens[ctx.t].name !== "|" && ctx.tokens[ctx.t].name !== "&") {
-        return typeExpr
-    }
-    typeExpr.operator = ctx.tokens[ctx.t].value === "|" ? 'OR' : 'AND';
-    ctx.t++; // consume operator
-    if (!ctx.tokens[ctx.t] ) {
-        return new MissingSyntaxError('type expression', ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
-    }
-    let right = parseTypeExpression(ctx);
-    if (right instanceof Error) return right;
+export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeExprNode | Error => {
+    
+    let startsWithOpr = false
+    let typeExpr = new TypeExprNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
 
-    typeExpr.right = right;
+    // Leading opr is allowed
+    if (ctx.tokens[ctx.t].name === "|" ) {
+        typeExpr.operator = 'OR';
+        ctx.t++; // consume operator
+    } else if (ctx.tokens[ctx.t].name === "&" ) {
+        typeExpr.operator = 'AND';
+        ctx.t++; // consume operator
+    }  
+    if (!ctx.tokens[ctx.t] || (ctx.tokens[ctx.t].name !== "IDENTIFIER")) {
+        let err = new Error("Expected a Type declaration at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+        err.name = "SyntaxError"
+        return err;
+    }
+
+    let first = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
+    typeExpr.types.push (first);
+    ctx.t++; // consume type
+    
+    while (ctx.t < ctx.tokens.length && (
+        ctx.tokens[ctx.t].name === "|" || 
+        ctx.tokens[ctx.t].name === "&" || 
+        ctx.tokens[ctx.t].name === "IDENTIFIER")
+    ) {
+        if (ctx.tokens[ctx.t].name === "|" ) {
+            if (typeExpr.operator === 'AND') {
+                let err = new Error("Cannot mix AND and OR operators in a type declaration");
+                err.name = "SyntaxError"
+                return err;
+            } 
+            typeExpr.operator = 'OR';
+            ctx.t++; // consume operator 
+        } else if (ctx.tokens[ctx.t].name === "&" ) {
+            if (typeExpr.operator === 'OR') {
+                let err = new Error("Cannot mix AND and OR operators in a type declaration");
+                err.name = "SyntaxError"
+                return err;
+            } 
+            typeExpr.operator = 'AND';
+            ctx.t++; // consume operator
+        }
+
+        if (ctx.tokens[ctx.t].name !== "IDENTIFIER") {
+            let err = new Error("Expected a Type declaration at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+            err.name = "SyntaxError"
+            return err;
+        }
+
+        let next = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
+        typeExpr.types.push (next);
+        ctx.t++; // consume type
+    }
     return typeExpr;
 }
 

@@ -1,1 +1,12 @@
-let x: Int | string & Some= 3
+let x: Int | string |Some | = 3
+
+-[
+    def Direction =
+            | East
+            | West
+            | Noth
+            | South
+
+    def Velocity = Speed & Direction
+        
+]-

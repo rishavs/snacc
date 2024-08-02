@@ -1,5 +1,4 @@
-import { IllegalCharError, MissingSyntaxError, UnclosedDelimiterError } from "./errors"
-import { Context, Token } from "./defs"
+import { Context, keywords, operators, Token } from "./defs"
 
 const isAlphabet = (c: string) => {
     return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
@@ -46,74 +45,28 @@ export const lexFile = (ctx: Context) => {
                 ctx.c++
             }
         
-        // Multi line comments
+        // Multi line Comments
         } else if (ctx.src.startsWith("-[", ctx.c)) {
             lexMultiLineComment(ctx)
 
-        } else if (ctx.src.startsWith("-", ctx.c)) {
-            addToken(ctx, "-", ctx.c)
-        
-        // Types
-        } else if (ctx.src.startsWith(":", ctx.c)) {
-            addToken(ctx, ":", ctx.c)
-
-        } else if (ctx.src.startsWith("|", ctx.c)) {
-            addToken(ctx, "|", ctx.c)
-
-        } else if (ctx.src.startsWith("&", ctx.c)) {
-            addToken(ctx, "&", ctx.c)
-
-            
-
-        // } else if (ctx.src.startsWith("Int64", ctx.c)) {
-        //     addToken(ctx, "INT64", ctx.c + 4)
-        
-        // } else if (ctx.src.startsWith("Dec64", ctx.c)) {
-        //     addToken(ctx, "DEC64", ctx.c + 4)
-
-        // } else if (ctx.src.startsWith("Bool", ctx.c)) {
-        //     addToken(ctx, "BOOL", ctx.c + 3)
-            
-        // Operators
-        } else if (ctx.src.startsWith(",", ctx.c)) {
-            addToken(ctx, ",", ctx.c)
-
-        } else if (ctx.src.startsWith(".", ctx.c)) {
-            addToken(ctx, ".", ctx.c)
-
-        } else if (ctx.src.startsWith("==", ctx.c)) {
-            addToken(ctx, "==", ctx.c + 1)
-
-        } else if (ctx.src.startsWith("=", ctx.c)) {
-            addToken(ctx, "=", ctx.c)
-        
-        } else if (ctx.src.startsWith("+", ctx.c)) {
-            addToken(ctx, "+", ctx.c)
-
-        } else if (ctx.src.startsWith("-", ctx.c)) {
-            addToken(ctx, "-", ctx.c)
-
-        } else if (ctx.src.startsWith("*", ctx.c)) {
-            addToken(ctx, "*", ctx.c)
-
-        } else if (ctx.src.startsWith("/", ctx.c)) {
-            addToken(ctx, "/", ctx.c)
-
-        } else if (c === '(') {
-            addToken(ctx, "(", ctx.c)
-
-        } else if (c === ')') {
-            addToken(ctx, ")", ctx.c)
-
-        // Keywords
-        } else if (ctx.src.startsWith("let", ctx.c)) {
-            addToken(ctx, "let", ctx.c + 2)
-            if (c !== ' ' && c !== '\n' && c !== '\t' && c !== '\r') {
-                let err = new MissingSyntaxError("space after keyword", ctx.c + 2, ctx.line)
-            }
-
-        // Identifier or keyword
+         // Identifier or keyword
         } else if (isAlphabet(c) || c === "_") {
+            let found = false
+            for (let kwd of keywords) {
+                if (ctx.src.startsWith(kwd, ctx.c)) {
+                    addToken(ctx, kwd, ctx.c + kwd.length - 1)
+                    found = true
+                    c = ctx.src[ctx.c]
+                    if (c !== ' ' && c !== '\n' && c !== '\t' && c !== '\r') {
+                        let err = new Error(`Expected a space after the keyword "${kwd}" at Line:${ctx.line} & Pos:${ctx.c}`)
+                        err.name = "SyntaxError"
+                        ctx.errors.push(err)
+                    }
+                    break
+                }
+            } 
+            if (found) continue
+
             let anchor = ctx.c
             let id = lexIdentifier(ctx)
             
@@ -122,13 +75,23 @@ export const lexFile = (ctx: Context) => {
                 tok.value = id
                 ctx.tokens.push(tok)
             }
-
-            
             
         // Illegal characters
         } else {
-            let illegalTokenErr = new IllegalCharError(c, ctx.c, ctx.line)
-            ctx.errors.push(illegalTokenErr)
+            let found = false
+            for (let opr of operators) {
+                if (ctx.src.startsWith(opr, ctx.c)) {
+                    addToken(ctx, opr, ctx.c + opr.length - 1)
+                    found = true
+                    break
+                }
+            }
+            if (found) continue
+
+            // Add error for illegal characters
+            let err = new Error(`Found an unexpected character "${c}" at Line:${ctx.line} & Pos:${ctx.c}`)
+            err.name = "SyntaxError"
+            ctx.errors.push(err)
             ctx.c++
         }
     }
@@ -162,40 +125,13 @@ const lexIdentifier = (ctx: Context): string => {
         skipWhitespace(ctx)
         let next = lexIdentifier(ctx)
         if (next === '') {
-            let err = new MissingSyntaxError("identifier after '.'", ctx.c, ctx.line)
+            let err = new Error(`Expected a Qualified Identifier fragment after the "." at Line:${ctx.line} & Pos:${cursor}`)
+            err.name = "SyntaxError"
             ctx.errors.push(err)
         }
         qualifiedName += "." + next
     }
     return qualifiedName
-}
-
-const lexIdsandKeywords = (ctx: Context) => {
-    let cursor = ctx.c
-    let c = ctx.src[cursor]
-    while (cursor < ctx.src.length && (
-        isAlphabet(c) 
-        || isDigit(c) 
-        || c === "_")
-    ) { 
-        cursor++
-        c = ctx.src[cursor]
-    }
-    let buffer = ctx.src.substring(ctx.c, cursor)
-    switch (buffer) {
-        case 'let':
-            addToken(ctx, 'let', cursor - 1)
-            break
-
-        default:
-            if (ctx.errors.length === 0) {
-                let tok = new Token('IDENTIFIER', ctx.c, cursor - 1, ctx.line)
-                tok.value = buffer
-                ctx.tokens.push(tok)
-            }
-            break
-    }
-    ctx.c = cursor
 }
 
 const lexNumbers = (ctx: Context) => {
@@ -207,8 +143,9 @@ const lexNumbers = (ctx: Context) => {
         isDigit(c) || c === "." || c === "_"
     )) {
         if (c === "." && isFloat) {
-            let error = new IllegalCharError(c, cursor, ctx.line)
-            ctx.errors.push(error)
+            let err = new Error(`Found an unexpected "." at Line:${ctx.line} & Pos:${cursor}`)
+            err.name = "SyntaxError"
+            ctx.errors.push(err)
             cursor++
             break
         }
@@ -246,7 +183,8 @@ const lexMultiLineComment = (ctx: Context) => {
         ctx.c++
     }
     if (!delimClosed) {
-        let unclosedCommentErr = new UnclosedDelimiterError("multi-line comment", "-[", anchorPos, anchorLine)
-        ctx.errors.push(unclosedCommentErr)
+        let err = new Error(`The multi-line comment starting at Line:${anchorLine} & Pos:${anchorPos}, is not closed`)
+        err.name = "SyntaxError"
+        ctx.errors.push(err)
     }
 }

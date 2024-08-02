@@ -27,7 +27,7 @@ export const operators = [
     '=', 
     
     // Unary operators
-    '!', '=',
+    '!', 
 
     // 2 char Misc operators
     '->', '=>', 

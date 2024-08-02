@@ -42,7 +42,7 @@ export class DeclarationNode extends Node {
     isPublic?: boolean = false;
     isNewDeclaration: boolean = false;
 
-    typeExpr?: BinaryExpressionTypeNode;
+    declaredType?: TypeExprNode;
     id!: IdentifierNode;
     expression?: Node;
     constructor(start: number, line: number) {
@@ -65,6 +65,13 @@ export class ObjectTypeNode extends Node {
     properties!: Map<string, BinaryExpressionTypeNode>;
     constructor(start: number, line: number) {
         super('OBJECTTYPE', start, line);
+    }
+}
+export class TypeExprNode extends Node {
+    operator: 'AND' | 'OR' = 'OR'
+    types : (TypeExprNode | PrimaryTypeNode | ObjectTypeNode )[] = []
+    constructor(start: number, line: number) {
+        super('TYPEEXPR', start, line);
     }
 }
 
