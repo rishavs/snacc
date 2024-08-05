@@ -1,17 +1,25 @@
 import { 
-    DeclarationNode, IdentifierNode, FunCallNode, Node, BinaryNode,
-    UnaryNode, IntNode, FloatNode,
-    GroupedExprNode,
-    PrimaryTypeNode,
-    TypeChainExprNode
-} from "./ast";
-import { builtinTypes, Context, Token } from "./defs";
+    BinaryLeaf, DeclarationLeaf, FloatLeaf, FunCallLeaf, GroupedExprLeaf, 
+    IdentifierLeaf, IntLeaf, Leaf, PrimaryTypeLeaf, RootLeaf, TypeChainExprLeaf, 
+    UnaryLeaf 
+} from "./ass";
+import { Context, Token } from "./defs";
 
-export const parseFile = (ctx: Context) => {
+function pushToAss<T extends Leaf, A extends any[]>(ctx: Context, cls: new (...args: A) => T, ...args: A): T {
+    let leaf = new cls(...args);
+    leaf.self = ctx.ass.push(leaf);
+
+    return leaf;
+}
+
+export const parseFileToAss = (ctx: Context) => {
     ctx.t = 0;
     ctx.line = 0;
 
-    let stmt : Node | Error
+    let root = new RootLeaf(0,0, ctx.filepath)
+    root.self = ctx.ass.push(root) - 1
+
+    let stmt : Leaf | Error
     let token : Token
     let nextToken : Token
 
@@ -31,9 +39,10 @@ export const parseFile = (ctx: Context) => {
             // stmt = new MissingSyntaxError("Statement", token.start, token.line)
         }
 
-        if (stmt instanceof Node) {
-            stmt.parent = ctx.root;
-            ctx.root.statements.push(stmt);
+        if (stmt instanceof Leaf) {
+            stmt.parent = root.self;
+            root.statements.push(stmt.self)
+
         } else {
             ctx.errors.push(stmt);
             recover(ctx);
@@ -41,8 +50,9 @@ export const parseFile = (ctx: Context) => {
     }
 }
 
-export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
-    let decl = new DeclarationNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+export const parseDeclarationStmt = (ctx: Context): DeclarationLeaf | Error => {
+    let decl = new DeclarationLeaf(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    decl.self = ctx.ass.push(decl) - 1
 
     if (ctx.tokens[ctx.t].name === "let") {
         ctx.t++; // consume 'let'
@@ -57,25 +67,28 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 
     let identifier = parseIdentifier(ctx);
     if (identifier instanceof Error) return identifier;
-    decl.id = identifier;
+    identifier.parent = decl.self
+    decl.id = identifier.self;
 
-    // parse type expression
-    if (ctx.tokens[ctx.t].name === ":") {
-        ctx.t++; // consume ':'
-        let typeExpr = parseTypeExpression(ctx);
-        if (typeExpr instanceof Error) return typeExpr;
-        decl.declaredType = typeExpr;
+    if (ctx.tokens[ctx.t].name !== ":") {
+        console.log(ctx.tokens[ctx.t])
+        let err = new Error("Expected a ':' after the identifier for the Type declaration at Line:" + ctx.line + " & Pos:" + ctx.tokens[ctx.t].start)
+        err.name = "SyntaxError"
+        return err;
     }
-    
-    // parse assignment
+    ctx.t++; // consume ':'
+    let typeExpr = parseTypeExpression(ctx);
+    if (typeExpr instanceof Error) return typeExpr;
+    typeExpr.parent = decl.self
+    decl.declaredType = typeExpr.self
+
     if (ctx.tokens[ctx.t].name === "=") {
         // Handle assignment
         ctx.t++; // consume '='
         let expr = parseExpression(ctx);
         if (expr instanceof Error) return expr;
-        decl.expression = expr;
+        decl.expression = expr.self
     } 
-
     // Only declaration
     return decl
 }
@@ -84,8 +97,9 @@ export const parseDeclarationStmt = (ctx: Context): DeclarationNode | Error => {
 // A type expression is a chain of types separated by either an 'AND' or 'OR' operator
 // A chain can have only operator kind
 // A type expression will not handle anonymous/object types. they should be declared separately
-export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeChainExprNode | Error => {
-    let typeExpr = new TypeChainExprNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeChainExprLeaf | Error => {
+    let typeExpr = new TypeChainExprLeaf(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line);
+    typeExpr.self = ctx.ass.push(typeExpr) - 1
 
     // Leading opr is allowed
     if (ctx.tokens[ctx.t].name === "|" ) {
@@ -101,8 +115,10 @@ export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeChainE
         return err;
     }
 
-    let first = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
-    typeExpr.types.push (first.value);
+    let first = new PrimaryTypeLeaf(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
+    first.self = ctx.ass.push(first) - 1
+    first.parent = typeExpr.self
+    typeExpr.types.push (first.self);
     ctx.t++; // consume type
     
     while (ctx.t < ctx.tokens.length && (
@@ -134,26 +150,31 @@ export const parseTypeExpression = (ctx: Context, opr?: 'OR' |'AND'): TypeChainE
             return err;
         }
 
-        let next = new PrimaryTypeNode(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
-        typeExpr.types.push (next.value);
+        let next = new PrimaryTypeLeaf(ctx.tokens[ctx.t].start, ctx.tokens[ctx.t].line, ctx.tokens[ctx.t].value!);
+        next.self = ctx.ass.push(next) - 1
+        next.parent = typeExpr.self
+        typeExpr.types.push (next.self);
         ctx.t++; // consume type
     }
     return typeExpr;
 }
 
-export const parseExpression = (ctx: Context): Node | Error => {
+export const parseExpression = (ctx: Context): Leaf | Error => {
     return parseBinaryExpr(ctx);
 }
 
-export const parseUnaryExpr = (ctx: Context): Node | Error => {
+export const parseUnaryExpr = (ctx: Context): Leaf | Error => {
     let token = ctx.tokens[ctx.t];
+    let unary =  new UnaryLeaf(token.start, token.line, token.name);
+    unary.self = ctx.ass.push(unary) - 1
 
     if (token.name === "-" || token.name === "!") {
         ctx.t++; // consume '-'
         let expr = parsePrimaryExpr(ctx);
         if (expr instanceof Error) return expr;
-        let unary =  new UnaryNode(token.start, token.line, token.name, expr);
-        expr.parent = unary;
+        expr.self = ctx.ass.push(expr) - 1
+        unary.right = expr.self
+        expr.parent = unary.self
         return unary;
     } else {
         return parsePrimaryExpr(ctx);
@@ -175,7 +196,7 @@ const getPrecedence = (token: Token): number => {
     }
 }
 
-export const parseBinaryExpr = (ctx: Context, precedence = 0): Node | Error => {
+export const parseBinaryExpr = (ctx: Context, precedence = 0): Leaf | Error => {
     let left = parseUnaryExpr(ctx);
     if (left instanceof Error) return left;
 
@@ -187,9 +208,14 @@ export const parseBinaryExpr = (ctx: Context, precedence = 0): Node | Error => {
         ctx.t++; // consume operator
         let right = parseBinaryExpr(ctx, tokenPrecedence);
         if (right instanceof Error) return right;
+        if (left instanceof Error) return left;
 
-        let node: BinaryNode = new BinaryNode(left.start, left.line, token.name, left, right);
-        node.end = right.end;
+        let node: BinaryLeaf = new BinaryLeaf(left.start, left.line, token.name);
+        node.self = ctx.ass.push(node) - 1
+        left.parent = node.self
+        node.left = left.self;
+        right.parent = node.self
+        node.right = right.self;
         left = node;
     }
 
@@ -197,7 +223,8 @@ export const parseBinaryExpr = (ctx: Context, precedence = 0): Node | Error => {
 }
 
 
-export const parsePrimaryExpr = (ctx: Context): Node | Error => {
+
+export const parsePrimaryExpr = (ctx: Context): Leaf | Error => {
     let token = ctx.tokens[ctx.t];
     let nextToken = ctx.tokens[ctx.t + 1];
 
@@ -223,18 +250,22 @@ export const parsePrimaryExpr = (ctx: Context): Node | Error => {
     }
 }
 
-export const parseGroupedExpr = (ctx: Context): GroupedExprNode | Error => {
+export const parseGroupedExpr = (ctx: Context): GroupedExprLeaf | Error => {
     let token = ctx.tokens[ctx.t];
     if (token.name !== "(") {
         let err = new Error("Expected an opening parenthesis '(' for the grouped expression at Line:" + ctx.line + " & Pos:" + token.start)
         err.name = "SyntaxError"
         return err;
     }
+    let group = new GroupedExprLeaf(token.start, token.line);
+    group.self = ctx.ass.push(group) - 1
     ctx.t++; // consume '('
 
     // Parse the enclosed expression
     let expr = parseExpression(ctx);
     if (expr instanceof Error) return expr;
+    expr.parent = group.self
+    group.expression = expr.self
 
     // Check for the closing parenthesis ')'
     token = ctx.tokens[ctx.t];
@@ -245,12 +276,13 @@ export const parseGroupedExpr = (ctx: Context): GroupedExprNode | Error => {
     }
     ctx.t++; // consume ')'
 
-    return new GroupedExprNode(token.start, token.line, expr);
+    return group
 }
 
-export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
+export const parseFuncCall = (ctx: Context): FunCallLeaf | Error => {
     let token = ctx.tokens[ctx.t];
-    let funCallNode = new FunCallNode(token.start, token.line);
+    let funCallLeaf = new FunCallLeaf(token.start, token.line);
+    funCallLeaf.self = ctx.ass.push(funCallLeaf) - 1
 
     if (token.name !== "IDENTIFIER") {
         let err = new Error("Expected an Identifier for the function call at Line:" + ctx.line + " & Pos:" + token.start)
@@ -259,7 +291,8 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
     }
     let id = parseIdentifier(ctx);
     if (id instanceof Error) return id;
-    funCallNode.id = id;
+    funCallLeaf.id = id.self
+    id.parent = funCallLeaf.self
 
     if (ctx.tokens[ctx.t].name !== "(") {
         let err = new Error("Expected an opening parenthesis '(' for the function call at Line:" + ctx.line + " & Pos:" + token.start)
@@ -268,10 +301,10 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
     }
     ctx.t++; // consume '('
 
-    funCallNode.expressions = [];
+    funCallLeaf.expressions = [];
     if (ctx.tokens[ctx.t].name === ")") {
         ctx.t++; // consume ')'
-        return funCallNode; // empty args list
+        return funCallLeaf; // empty args list
     }
 
     // Leading comma is allowed
@@ -282,8 +315,8 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
     while (ctx.t < ctx.tokens.length && ctx.tokens[ctx.t].name !== "EOS") {
         let expr = parseExpression(ctx);
         if (expr instanceof Error) return expr;
-        expr.parent = funCallNode;
-        funCallNode.expressions.push(expr);
+        expr.parent = funCallLeaf.self;
+        funCallLeaf.expressions.push(expr.self);
 
         if (ctx.tokens[ctx.t].name === ")") break;
         if (ctx.tokens[ctx.t].name !== ",") {
@@ -300,36 +333,41 @@ export const parseFuncCall = (ctx: Context): FunCallNode | Error => {
     }
     ctx.t++; // consume ')'
 
-    return funCallNode
+    return funCallLeaf
 }
 
-export const parseIdentifier = (ctx: Context): IdentifierNode | Error => {
+export const parseIdentifier = (ctx: Context): IdentifierLeaf | Error => {
     let token = ctx.tokens[ctx.t];
     if (token.name !== "IDENTIFIER") {
         let err = new Error("Expected an Identifier at Line:" + ctx.line + " & Pos:" + token.start)
         err.name = "SyntaxError"
         return err;
     }
-    let node = new IdentifierNode(token.start, token.end, token.value!);
+    let leaf = new IdentifierLeaf(token.start, token.end, token.value!);
+    leaf.self = ctx.ass.push(leaf) - 1
+
     ctx.t++; // consume identifier
-    return node;
+    return leaf;
 }
 
-export const parseNumber = (ctx: Context): IntNode | FloatNode | Error => {
+export const parseNumber = (ctx: Context): IntLeaf | FloatLeaf | Error => {
     let token = ctx.tokens[ctx.t];
-    let node : IntNode | FloatNode;
-    if (token.name === 'INT') {
-        node = new IntNode(token.start, token.end, token.value!);
-        ctx.t++; // consume number
-    } else if (token.name === 'FLOAT') {
-        node = new FloatNode(token.start, token.end, token.value!);
-        ctx.t++; // consume number
-    } else {
+    if (token.name !== 'INT' && token.name !== 'FLOAT') {
         let err = new Error("Expected a Number at Line:" + ctx.line + " & Pos:" + token.start)
         err.name = "SyntaxError"
         return err;
     }
-    return node;
+
+    let leaf : IntLeaf | FloatLeaf;
+    if (token.name === 'INT') {
+        leaf = new IntLeaf(token.start, token.end, token.value!);
+    } else {
+        leaf = new FloatLeaf(token.start, token.end, token.value!);
+    }
+    leaf.self = ctx.ass.push(leaf) - 1
+
+    ctx.t++; // consume number
+    return leaf;
 }
 
 

@@ -1,3 +1,4 @@
+import type { Leaf } from "./ass"
 import { RootNode } from "./ast"
 
 
@@ -62,6 +63,7 @@ export class Context {
 
     t: number = 0
     root : RootNode = new RootNode(0, 0)
+    ass: Leaf[] = [] // abstract syntax stack
     parsingDuration: number = 0
 
     transpilingDuration: number = 0

@@ -1,25 +1,30 @@
-export class Node {
+export class Leaf {
     start: number;
     line: number;
+    depth?: number = 0
+    self!: number
 
     end?: number;
-    parent?: Node;
-    constructor(start: number, line: number) {
+    parent?: number; // Leaf index
+    constructor(start: number, line: number, depth?: number) {
         this.start = start;
         this.line = line;
+        this.depth = depth;
     }
 }
 
-export class RootNode extends Node {
-    statements: Node[] = []
-    constructor(start: number, line: number) {
+export class RootLeaf extends Leaf {
+    file: string;
+    statements: number[] = [] // Leaf indices
+    constructor(start: number, line: number, file: string) {
         super(start, line);
+        this.file = file;
     }
 }
 
-export class FunCallNode extends Node {
-    id!: IdentifierNode;
-    expressions?: Node[];
+export class FunCallLeaf extends Leaf {
+    id!: number; // Identifier Leaf index
+    expressions: number[] = [] // Leaf indices
     constructor(start: number, line: number) {
         super(start, line);
     }
@@ -27,22 +32,22 @@ export class FunCallNode extends Node {
 // ---------------------------
 // Statements
 // ---------------------------
-export class FunCallStmtNode extends Node {
-    id?: IdentifierNode;
-    expressions?: Node[];
+export class FunCallStmtLeaf extends Leaf {
+    id?: number; // Identifier Leaf index
+    expressions : number[] = [] // Leaf indices
     constructor(start: number, line: number) {
         super(start, line);
     }
 }
 
-export class DeclarationNode extends Node {
+export class DeclarationLeaf extends Leaf {
     isMutable?: boolean = false;
     isPublic?: boolean = false;
     isNewDeclaration: boolean = false;
 
-    declaredType?: TypeChainExprNode;
-    id!: IdentifierNode;
-    expression?: Node;
+    declaredType?: number; // TypeExpr Leaf index
+    id!: number; // Identifier Leaf index
+    expression?: number // Leaf index
     constructor(start: number, line: number) {
         super(start, line);
     }
@@ -51,7 +56,7 @@ export class DeclarationNode extends Node {
 // ---------------------------
 // Type Expressions
 // ---------------------------
-export class PrimaryTypeNode extends Node {
+export class PrimaryTypeLeaf extends Leaf {
     value: string;
     constructor(start: number, line: number, value: string) {
         super(start, line);
@@ -59,9 +64,9 @@ export class PrimaryTypeNode extends Node {
     }
 }
 
-export class TypeChainExprNode extends Node {
+export class TypeChainExprLeaf extends Leaf {
     operator: 'AND' | 'OR' = 'OR'
-    types : string[] = []
+    types : number[] = []
     constructor(start: number, line: number) {
         super(start, line);
     }
@@ -70,37 +75,33 @@ export class TypeChainExprNode extends Node {
 // ---------------------------
 // Expressions
 // ---------------------------
-export class UnaryNode extends Node {
+export class UnaryLeaf extends Leaf {
     operator: string;
-    right: Node;
-    constructor(start: number, line: number, operator: string, right: Node) {
+    right!: number; // Leaf index
+    constructor(start: number, line: number, operator: string) {
         super(start, line);
         this.operator = operator;
-        this.right = right;
     }
 }
 
-export class BinaryNode extends Node {
+export class BinaryLeaf extends Leaf {
     operator: string;
-    left: Node;
-    right: Node;
-    constructor(start: number, line: number, operator: string, left: Node, right: Node) {
+    left!: number; // Leaf index
+    right!: number; // Leaf index
+    constructor(start: number, line: number, operator: string) {
         super(start, line);
         this.operator = operator;
-        this.left = left;
-        this.right = right;
     }
 }
 
-export class GroupedExprNode extends Node {
-    expression: Node;
-    constructor(start: number, line: number, expr: Node) {
+export class GroupedExprLeaf extends Leaf {
+    expression!: number; // Leaf index
+    constructor(start: number, line: number) {
         super(start, line);
-        this.expression = expr;
     }
 }
 
-export class IdentifierNode extends Node {
+export class IdentifierLeaf extends Leaf {
     isQualified: boolean = false
     value!: string;
     constructor(start: number, line: number, value: string) {
@@ -110,7 +111,7 @@ export class IdentifierNode extends Node {
 }
 
 
-export class IntNode extends Node {
+export class IntLeaf extends Leaf {
     value: string;
     constructor(start: number, line: number, value: string) {
         super(start, line);
@@ -118,7 +119,7 @@ export class IntNode extends Node {
     }
 }
 
-export class FloatNode extends Node {
+export class FloatLeaf extends Leaf {
     value: string;
     constructor(start: number, line: number, value: string) {
         super(start, line);

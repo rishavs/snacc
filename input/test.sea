@@ -1,4 +1,8 @@
-let x: Int | string |Some | = 3
+let x: Int | string |Some = 3 - 2
+let y : Int = 4
+
+let  z = x + y
+
 
 -[
     def Direction =
