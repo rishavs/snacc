@@ -321,9 +321,11 @@ produce immutable views; views support length, checked lookup, and half-open
 slicing. Interpreted strings may contain `{{expression}}` interpolation; each
 expression is checked and formatted using the same closed set of scalar and
 text types accepted by concatenation, in left-to-right order. Raw strings do
-not interpolate. A view is a non-owning borrow of a named `String` place: its
-source cannot be moved, reassigned, boxed, returned, or stored while the view
-is live, and the compiler ends the borrow at the last reachable local use.
+not interpolate. A view is a non-owning borrow of a named owning place:
+`View<Byte>` and `View<Unicode>` may borrow a `String`, while `View<T>` may
+borrow an `Array<T, N>` or `List<T>`. Its source cannot be moved, reassigned,
+boxed, returned, stored, or structurally mutated while the view is live, and
+the compiler ends the borrow at the last reachable local use.
 `String.clone()`, `String.concat(part)`,
 `String.from_unicode(View<Unicode>)`, and checked
 `String.from_utf8(View<Byte>)` are built-in operations. `Box<T>` and
@@ -342,9 +344,12 @@ capabilities: they may be passed, returned, stored, and used in other type
 applications, but arithmetic, comparison, equality, printing, literals, and
 type tests require a concrete type that supports the operation. Generic
 methods, unions, represented types, Rust bridges, and qualified generic calls
-are not part of the language. Reachable specializations are private concrete
-functions/types; the compiler rejects more than 128 active specialization
-edges or 4,096 unique specializations in one compilation.
+are not part of the language. Every generic declaration is checked with
+distinct opaque nominal parameters even when unused; each reachable
+specialization is then checked again after concrete substitution. Reachable
+specializations are private concrete functions/types; the compiler rejects
+more than 128 active specialization edges or 4,096 unique specializations in
+one compilation.
 
 `Array<T, N>`, `List<T>`, `View<T>`, `Map<K, V>`, and `Set<T>` are closed
 collection forms. Array and list literals require an expected array or list
@@ -352,6 +357,8 @@ type. Arrays and lists support `length()`, `is_empty()`, indexing, and
 sequence `for` iteration; lists also expose `capacity()`, `push`, `pop`,
 `insert`, `remove`, `clear`, and `reserve` for storable element types, and
 `view()` lends an immutable view.
+Sequence iteration borrows its source for the complete loop body, so that body
+cannot structurally mutate the iterated array or list.
 Same-typed arrays, lists, and generic views support element-wise `==` and `!=`
 when their element type supports equality.
 Empty maps and sets can be constructed with their complete type application.

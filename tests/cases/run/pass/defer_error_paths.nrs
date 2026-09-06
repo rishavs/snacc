@@ -1,0 +1,58 @@
+fun report_error() do
+    print(99)
+end
+
+fun consume(text: String) do
+    print(text)
+end
+
+fun implicit_failure(): Int64 | Error do
+    defer_on_error report_error()
+    Error(category: "audit", header: "failure", message: "expected")
+end
+
+fun implicit_success(): Int64 | Error do
+    defer_on_error report_error()
+    7
+end
+
+fun deferred_parameter(text: String) do
+    defer consume(text)
+end
+
+fun error_only_capture(success: Bool): String | Error do
+    let text: String = "kept"
+    defer_on_error consume(text)
+    if success then
+        return text
+    end
+    Error(category: "audit", header: "failure", message: "expected")
+end
+
+fun pass(text: String): String do
+    text
+end
+
+fun deferred_nested(text: String) do
+    defer consume(pass(text))
+end
+
+let failed: Int64 | Error = implicit_failure()
+if failed is Error(error) then
+    print(1)
+end
+
+let succeeded: Int64 | Error = implicit_success()
+if succeeded is Int64(value) then
+    print(value)
+end
+
+deferred_parameter("parameter")
+
+let kept: String | Error = error_only_capture(true)
+if kept is String(text) then
+    print(text)
+end
+
+let discarded: String | Error = error_only_capture(false)
+deferred_nested("nested")

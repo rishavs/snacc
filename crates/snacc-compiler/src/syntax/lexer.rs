@@ -445,6 +445,85 @@ fn classify_number(
     }
 }
 
+/// Applies the ordinary numeric classifier to a complete token discovered
+/// inside interpolation. The interpolation scanner cannot recursively embed
+/// the opaque Chumsky lexer type, so it reproduces only the token boundary;
+/// all validation and conversion still converge here.
+fn classify_fragment_number(full: &str) -> Result<NumLiteral, String> {
+    let bytes = full.as_bytes();
+    let mut position = 0usize;
+    let (magnitude, radix) = if bytes.len() >= 2
+        && bytes[0] == b'0'
+        && matches!(bytes[1], b'b' | b'B' | b'o' | b'O' | b'x' | b'X')
+    {
+        let prefix = &full[..2];
+        position = 2;
+        let radix = match bytes[1].to_ascii_lowercase() {
+            b'b' => 2,
+            b'o' => 8,
+            b'x' => 16,
+            _ => unreachable!("guarded radix prefix"),
+        };
+        let start = position;
+        while position < bytes.len()
+            && (bytes[position] == b'_' || (bytes[position] as char).to_digit(radix).is_some())
+        {
+            position += 1;
+        }
+        (
+            RawMagnitude::Radix(prefix, (position > start).then_some(&full[start..position])),
+            radix,
+        )
+    } else {
+        while position < bytes.len()
+            && (bytes[position].is_ascii_digit() || bytes[position] == b'_')
+        {
+            position += 1;
+        }
+        (RawMagnitude::Decimal(&full[..position]), 10)
+    };
+    let fraction = if position < bytes.len() && bytes[position] == b'.' {
+        position += 1;
+        let start = position;
+        while position < bytes.len()
+            && (bytes[position].is_ascii_digit() || bytes[position] == b'_')
+        {
+            position += 1;
+        }
+        Some((position > start).then_some(&full[start..position]))
+    } else {
+        None
+    };
+    let exponent = if position < bytes.len()
+        && matches!(bytes[position], b'e' | b'E')
+        && !(radix == 16 && (bytes[position] as char).is_ascii_hexdigit())
+    {
+        let uppercase = bytes[position] == b'E';
+        position += 1;
+        let sign = if position < bytes.len() && matches!(bytes[position], b'+' | b'-') {
+            let sign = bytes[position] as char;
+            position += 1;
+            Some(sign)
+        } else {
+            None
+        };
+        let start = position;
+        while position < bytes.len()
+            && (bytes[position].is_ascii_digit() || bytes[position] == b'_')
+        {
+            position += 1;
+        }
+        Some((
+            uppercase,
+            sign,
+            (position > start).then_some(&full[start..position]),
+        ))
+    } else {
+        None
+    };
+    classify_number(full, magnitude, fraction, exponent, &full[position..])
+}
+
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
     // `integer-magnitude` (Specification 020 section 4): a lowercase radix
@@ -684,6 +763,12 @@ pub fn lexer<'src>()
                                 while inp.peek() == Some('#') {
                                     inp.next();
                                     hashes += 1;
+                                    if hashes > 255 {
+                                        return Err(Rich::custom(
+                                            inp.span_since(&literal_start),
+                                            "raw string delimiter may contain at most 255 '#' characters",
+                                        ));
+                                    }
                                 }
                                 if inp.next() == Some('"') {
                                     loop {
@@ -720,6 +805,11 @@ pub fn lexer<'src>()
                                 };
                                 if inner == '\\' {
                                     inp.next();
+                                } else if matches!(inner, '\n' | '\r') {
+                                    return Err(Rich::custom(
+                                        inp.span_since(&literal_start),
+                                        "an interpreted string literal cannot contain an unescaped line break",
+                                    ));
                                 } else if inner == '"' {
                                     break;
                                 }
@@ -931,10 +1021,13 @@ fn lex_interpolation_fragment<'src>(
         let start = position;
         let token = if character.is_ascii_digit() {
             while position < source.len()
-                && source[position..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| next.is_ascii_alphanumeric() || matches!(next, '_' | '.'))
+                && source[position..].chars().next().is_some_and(|next| {
+                    next.is_ascii_alphanumeric()
+                        || matches!(next, '_' | '.')
+                        || (matches!(next, '+' | '-')
+                            && position > start
+                            && matches!(source.as_bytes()[position - 1], b'e' | b'E'))
+                })
             {
                 position += source[position..]
                     .chars()
@@ -943,74 +1036,48 @@ fn lex_interpolation_fragment<'src>(
                     .len_utf8();
             }
             let text = &source[start..position];
-            let (magnitude, suffix) = ["u64", "u32", "u16", "u8", "f32"]
-                .iter()
-                .find_map(|suffix| {
-                    text.strip_suffix(suffix)
-                        .map(|magnitude| (magnitude, *suffix))
-                })
-                .unwrap_or((text, ""));
-            let number = if suffix == "f32" {
-                magnitude
-                    .parse::<f32>()
-                    .map(NumLiteral::F32)
-                    .map_err(|_| format!("invalid numeric literal '{text}'"))?
-            } else if suffix.starts_with('u') {
-                let (radix, digits) = if let Some(digits) = magnitude.strip_prefix("0x") {
-                    (16, digits)
-                } else if let Some(digits) = magnitude.strip_prefix("0o") {
-                    (8, digits)
-                } else if let Some(digits) = magnitude.strip_prefix("0b") {
-                    (2, digits)
-                } else {
-                    (10, magnitude)
-                };
-                let value = u64::from_str_radix(&digits.replace('_', ""), radix)
-                    .map_err(|_| format!("invalid numeric literal '{text}'"))?;
-                match suffix {
-                    "u8" => NumLiteral::U8(u8::try_from(value).map_err(|_| {
-                        format!("numeric literal '{text}' is out of range for Byte")
-                    })?),
-                    "u16" => NumLiteral::U16(u16::try_from(value).map_err(|_| {
-                        format!("numeric literal '{text}' is out of range for UInt16")
-                    })?),
-                    "u32" => NumLiteral::U32(u32::try_from(value).map_err(|_| {
-                        format!("numeric literal '{text}' is out of range for UInt32")
-                    })?),
-                    _ => NumLiteral::U64(value),
+            Token::Num(classify_fragment_number(text)?)
+        } else if character == 'r'
+            && source[start + 1..]
+                .chars()
+                .next()
+                .is_some_and(|next| matches!(next, '#' | '"'))
+        {
+            position += 1;
+            let mut hashes = 0usize;
+            while position < source.len() && source.as_bytes()[position] == b'#' {
+                position += 1;
+                hashes += 1;
+                if hashes > 255 {
+                    return Err(
+                        "raw string delimiter may contain at most 255 '#' characters".into(),
+                    );
                 }
-            } else if magnitude.contains('.') || magnitude.contains('e') {
-                NumLiteral::F64(
-                    magnitude
-                        .parse::<f64>()
-                        .map_err(|_| format!("invalid numeric literal '{text}'"))?,
-                )
-            } else {
-                NumLiteral::Int(
-                    magnitude
-                        .parse::<i64>()
-                        .map_err(|_| format!("invalid numeric literal '{text}'"))?,
-                )
-            };
-            Token::Num(number)
-        } else if character == '"' {
+            }
+            if position >= source.len() || source.as_bytes()[position] != b'"' {
+                return Err("raw string literal must begin with r\"".into());
+            }
             position += 1;
             let body_start = position;
             loop {
-                let Some(next) = source[position..].chars().next() else {
-                    return Err("unterminated string inside interpolation".into());
+                let Some(relative) = source[position..].find('"') else {
+                    return Err("unterminated raw string inside interpolation".into());
                 };
-                position += next.len_utf8();
-                if next == '\\' {
-                    let Some(escaped) = source[position..].chars().next() else {
-                        return Err("string literal ends with an incomplete escape".into());
-                    };
-                    position += escaped.len_utf8();
-                } else if next == '"' {
-                    break;
+                let quote = position + relative;
+                let hashes_start = quote + 1;
+                let hashes_end = hashes_start.saturating_add(hashes);
+                if hashes_end <= source.len()
+                    && source.as_bytes()[hashes_start..hashes_end]
+                        .iter()
+                        .all(|byte| *byte == b'#')
+                {
+                    position = hashes_end;
+                    break Token::RawStr(&source[body_start..quote]);
                 }
+                position = quote + 1;
             }
-            Token::Str(&source[body_start..position - 1])
+        } else if character == '"' {
+            scan_fragment_string(source, &mut position, source_offset)?
         } else if character == '\'' {
             position += 1;
             let body_start = position;
@@ -1073,6 +1140,153 @@ fn lex_interpolation_fragment<'src>(
         ));
     }
     Ok(tokens)
+}
+
+/// Scans an interpreted string nested in an interpolation expression. It
+/// mirrors the outer string token's structured representation so nested
+/// interpolation remains ordinary expression syntax instead of becoming
+/// literal braces.
+fn scan_fragment_string<'src>(
+    source: &'src str,
+    position: &mut usize,
+    source_offset: usize,
+) -> Result<Token<'src>, String> {
+    *position += 1;
+    let body_start = *position;
+    let mut literal_start = *position;
+    let mut parts = Vec::new();
+    loop {
+        let Some(character) = source[*position..].chars().next() else {
+            return Err("unterminated string inside interpolation".into());
+        };
+        let character_start = *position;
+        *position += character.len_utf8();
+        match character {
+            '"' => {
+                if parts.is_empty() {
+                    return Ok(Token::Str(&source[body_start..character_start]));
+                }
+                let segment = &source[literal_start..character_start];
+                if !segment.is_empty() {
+                    parts.push(InterpolatedPart::Literal(decode_string_content(segment)?));
+                }
+                return Ok(Token::Interpolated(parts));
+            }
+            '\n' | '\r' => {
+                return Err(
+                    "an interpreted string literal cannot contain an unescaped line break".into(),
+                );
+            }
+            '\\' => {
+                let Some(escaped) = source[*position..].chars().next() else {
+                    return Err("string literal ends with an incomplete escape".into());
+                };
+                *position += escaped.len_utf8();
+                if escaped == 'u' && source[*position..].starts_with('{') {
+                    let Some(close) = source[*position + 1..].find('}') else {
+                        return Err("Unicode escape is missing its closing '}'".into());
+                    };
+                    *position += close + 2;
+                }
+            }
+            '{' if source[*position..].starts_with('{') => {
+                let segment = &source[literal_start..character_start];
+                if !segment.is_empty() {
+                    parts.push(InterpolatedPart::Literal(decode_string_content(segment)?));
+                }
+                *position += 1;
+                let expression_start = *position;
+                let expression_end = scan_fragment_interpolation_end(source, position)?;
+                let expression = &source[expression_start..expression_end];
+                if expression.trim().is_empty() {
+                    return Err("interpolation expression cannot be empty".into());
+                }
+                let tokens =
+                    lex_interpolation_fragment(expression, source_offset + expression_start)?;
+                if tokens.is_empty() {
+                    return Err("interpolation expression produced no tokens".into());
+                }
+                parts.push(InterpolatedPart::Expression(tokens));
+                literal_start = *position;
+            }
+            '}' if source[*position..].starts_with('}') => {
+                return Err("unexpected closing interpolation delimiter '}}'".into());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Advances through one nested interpolation expression and returns the byte
+/// before its outer `}}`. Braces inside string and Unicode literals do not
+/// participate in balancing.
+fn scan_fragment_interpolation_end(source: &str, position: &mut usize) -> Result<usize, String> {
+    let mut depth = 0usize;
+    loop {
+        let Some(character) = source[*position..].chars().next() else {
+            return Err("interpolation is missing its closing '}}'".into());
+        };
+        let start = *position;
+        *position += character.len_utf8();
+        match character {
+            'r' if source[*position..].starts_with('#') || source[*position..].starts_with('"') => {
+                let mut hashes = 0usize;
+                while source[*position..].starts_with('#') {
+                    *position += 1;
+                    hashes += 1;
+                    if hashes > 255 {
+                        return Err(
+                            "raw string delimiter may contain at most 255 '#' characters".into(),
+                        );
+                    }
+                }
+                if !source[*position..].starts_with('"') {
+                    continue;
+                }
+                *position += 1;
+                loop {
+                    let Some(relative) = source[*position..].find('"') else {
+                        return Err("unterminated raw string inside interpolation".into());
+                    };
+                    let quote = *position + relative;
+                    let close = quote + 1 + hashes;
+                    if close <= source.len()
+                        && source.as_bytes()[quote + 1..close]
+                            .iter()
+                            .all(|byte| *byte == b'#')
+                    {
+                        *position = close;
+                        break;
+                    }
+                    *position = quote + 1;
+                }
+            }
+            '"' => {
+                scan_fragment_string(source, position, 0)?;
+            }
+            '\'' => loop {
+                let Some(inner) = source[*position..].chars().next() else {
+                    return Err("unterminated Unicode literal inside interpolation".into());
+                };
+                *position += inner.len_utf8();
+                if inner == '\\' {
+                    let Some(escaped) = source[*position..].chars().next() else {
+                        return Err("Unicode literal ends with an incomplete escape".into());
+                    };
+                    *position += escaped.len_utf8();
+                } else if inner == '\'' {
+                    break;
+                }
+            },
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            '}' if source[*position..].starts_with('}') => {
+                *position += 1;
+                return Ok(start);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn fragment_keyword<'src>(text: &'src str) -> Token<'src> {
@@ -1254,8 +1468,8 @@ mod tests {
     }
 
     // Specification 020: radix literals, scientific notation, separators, and
-    // the required diagnostics for each. A small, focused sample rather than
-    // the full conformance matrix (deferred to the conformance-test wave).
+    // their required diagnostics. Native conformance tests cover the same
+    // forms through the complete compiler pipeline.
 
     #[test]
     fn lexes_binary_octal_and_hexadecimal_integers() {

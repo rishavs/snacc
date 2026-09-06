@@ -2,3 +2,5 @@ let concat_subject: String = "Ada"
 let concat_message: String = "Hello, ".concat(concat_subject).concat(" #").concat(3).concat('!')
 print(concat_message)
 print("value={{7u8}}, flag={{true}}")
+print("nested={{"value={{2}}"}}")
+print("number={{1e-2}} raw={{r#"a\b"#}}")

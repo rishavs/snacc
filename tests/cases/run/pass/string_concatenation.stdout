@@ -1,2 +1,4 @@
 Hello, Ada #3!
 value=7, flag=true
+nested=value=2
+number=0.01 raw=a\b

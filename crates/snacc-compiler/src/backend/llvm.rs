@@ -879,12 +879,7 @@ fn build_module<'ctx>(
         for (param, value) in function.params.iter().zip(llvm_function.get_params()) {
             env.push((param.name.clone(), param_slot(param, value)));
         }
-        cg.body(
-            &mut env,
-            &function.body,
-            function.result,
-            &function.param_drops,
-        )?;
+        cg.body(&mut env, &function.body, function.result)?;
     }
 
     for (id, method) in program.methods.iter().enumerate() {
@@ -904,7 +899,7 @@ fn build_module<'ctx>(
         {
             env.push((param.name.clone(), param_slot(param, value)));
         }
-        cg.body(&mut env, &method.body, method.result, &method.param_drops)?;
+        cg.body(&mut env, &method.body, method.result)?;
     }
 
     // The Rust runtime owns the platform entry point and calls this stable ABI
@@ -1177,25 +1172,14 @@ impl<'ctx> Codegen<'ctx, '_> {
             .expect("lowering always occurs inside a function")
     }
 
-    /// Lowers one function or method body and its return. `param_drops` is
-    /// the checked cleanup plan's by-value-parameter obligations
-    /// (Specification 016 section 8.1), run after the body's own locals
-    /// (already handled inside `self.block` via `block.drops`) and after the
-    /// result value itself has been fully computed, so a parameter returned
-    /// by value is never destroyed out from under its own return.
-    fn body(
-        &self,
-        env: &mut Env<'ctx>,
-        block: &TBlock,
-        result: Option<Ty>,
-        param_drops: &[Place],
-    ) -> Result<(), String> {
+    /// Lowers one function or method body and its return. Parameter drops are
+    /// already the final entries of the body's unified cleanup plan.
+    fn body(&self, env: &mut Env<'ctx>, block: &TBlock, result: Option<Ty>) -> Result<(), String> {
         let mut loops = Vec::new();
         let (value, terminated) = self.block(env, &mut loops, block)?;
         if terminated {
             return Ok(());
         }
-        self.drop_places(env, param_drops)?;
         match (result, value) {
             (Some(_), Some(value)) => self.builder.build_return(Some(&value)),
             (None, _) => self.builder.build_return(None),
@@ -1394,7 +1378,11 @@ impl<'ctx> Codegen<'ctx, '_> {
         // normal cleanup plan. Early exits carry their own plan on the checked
         // statement, so no second cleanup is appended after a terminator.
         if !terminated {
-            self.cleanup(env, loops, &block.cleanup, None)?;
+            let error = match (value, block.result_ty) {
+                (Some(value), Some(ty)) => self.result_error_condition(value, Some(ty))?,
+                _ => None,
+            };
+            self.cleanup(env, loops, &block.cleanup, error)?;
         }
         env.truncate(scope);
         Ok((value, terminated))
@@ -6274,8 +6262,8 @@ impl<'ctx> Codegen<'ctx, '_> {
             // obligation this allocation creates is not registered here --
             // it is whatever the checked cleanup plan already attached to
             // wherever this `box(...)` result ends up bound (a block's
-            // `drops`, a function's `param_drops`, or an assignment's
-            // `drop_before`), exactly like any other move-only value.
+            // `drops` or an assignment's `drop_before`), exactly like any
+            // other move-only value.
             TExpr::Box(operand, ty) => {
                 let Ty::Box(id) = *ty else {
                     return Err(internal("a 'box(...)' node did not have a box result type"));

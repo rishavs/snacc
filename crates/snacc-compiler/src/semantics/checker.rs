@@ -95,7 +95,7 @@ impl std::fmt::Display for Ty {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error {
     pub span: Span,
     pub msg: String,
@@ -598,6 +598,9 @@ pub struct TStmtIf {
 pub struct TBlock {
     pub statements: Vec<TStmt>,
     pub result: Option<TExpr>,
+    /// Expected type of a value-producing block. Lowering uses it to classify
+    /// an implicit fallthrough result before error-sensitive cleanup runs.
+    pub result_ty: Option<Ty>,
     /// A single reverse-registration cleanup plan for local destruction and
     /// deferred calls (Specification 025).
     pub cleanup: Vec<TCleanup>,
@@ -611,6 +614,9 @@ pub enum TCleanup {
 pub struct TDeferred {
     pub on_error: bool,
     pub call: TStmt,
+    pub span: Span,
+    /// Roots read, borrowed, or consumed when the call is evaluated at exit.
+    pub dependencies: Vec<PlaceRoot>,
     /// Whole roots consumed by the deferred call at exit. The backend uses
     /// these facts to avoid dropping a value after the call transfers it.
     pub consumes: Vec<PlaceRoot>,
@@ -621,12 +627,6 @@ pub struct TFunc {
     /// `None` is a function without a result; it lowers to LLVM `void`.
     pub result: Option<Ty>,
     pub body: TBlock,
-    /// Specification 016 section 8.1: by-value parameters still available
-    /// (not moved into a result or elsewhere) when the body finishes
-    /// normally, in reverse parameter order, destroyed just before the
-    /// function returns -- after the body's own cleanup plan, since
-    /// parameters were bound before any of them.
-    pub param_drops: Vec<Place>,
 }
 
 pub struct TMethod {
@@ -638,10 +638,6 @@ pub struct TMethod {
     /// no source-level method category and is not part of the signature.
     pub writes_receiver: bool,
     pub body: TBlock,
-    /// Same meaning as [`TFunc::param_drops`]. `self` is never included: a
-    /// receiver is always borrowed (Specification 010 section 15.3), never
-    /// owned by the method body.
-    pub param_drops: Vec<Place>,
 }
 
 pub struct TExtern {
@@ -677,6 +673,9 @@ struct Binding<'src> {
     name: &'src str,
     ty: Ty,
     mutable: bool,
+    /// Lexical cleanup-scope identity used by borrow provenance when this
+    /// binding is reassigned from a nested block.
+    scope: usize,
     /// Specification 016 section 7.3: set only for a union- or sum-test
     /// binding. Such a binding is never an independent owning root -- it is
     /// always a branch-scoped alias to its tested place's active payload --
@@ -688,6 +687,7 @@ struct Binding<'src> {
 
 /// One method call awaiting the receiver-write fixed point. Validation cannot
 /// run while bodies are checked because a callee's effect may not be known yet.
+#[derive(Clone)]
 struct ReceiverCall {
     method: MethodId,
     mutable_root: bool,
@@ -703,6 +703,9 @@ struct ViewBorrow {
     view_name: String,
     sources: Vec<PlaceRoot>,
     scope: usize,
+    /// Iteration keeps its source structurally borrowed for the complete loop
+    /// body even when the source-visible binding is unused.
+    persistent: bool,
 }
 
 struct Ctx<'src> {
@@ -760,6 +763,7 @@ struct Ctx<'src> {
     generic_chain: Vec<String>,
 }
 
+#[derive(Clone)]
 struct GenericRequest {
     name: String,
     args: Vec<Ty>,
@@ -772,6 +776,43 @@ const MAX_SPECIALIZATION_DEPTH: usize = 128;
 const MAX_SPECIALIZATIONS: usize = 4096;
 
 impl<'src> Ctx<'src> {
+    /// Builds an isolated semantic context for checking one generic template.
+    /// Checked trees and cleanup plans stay in the scratch context; only its
+    /// diagnostics are copied back to the real compilation.
+    fn generic_scratch(&self) -> Self {
+        Self {
+            sigs: self.sigs.clone(),
+            externs: self.externs.clone(),
+            types: self.types.clone(),
+            method_sigs: self.method_sigs.clone(),
+            method_index: self.method_index.clone(),
+            declared: Vec::new(),
+            loops: Vec::new(),
+            self_ty: None,
+            callable_result: None,
+            current_method: None,
+            direct_writes: self.direct_writes.clone(),
+            effect_edges: self.effect_edges.clone(),
+            receiver_calls: self.receiver_calls.clone(),
+            move_state: HashMap::new(),
+            view_borrows: Vec::new(),
+            cleanup_scopes: Vec::new(),
+            errors: Vec::new(),
+            unknown: None,
+            generic_funcs: self.generic_funcs.clone(),
+            generic_types: self.generic_types.clone(),
+            generic_type_finished: self.generic_type_finished.clone(),
+            generic_type_in_progress: self.generic_type_in_progress.clone(),
+            generic_type_stack: self.generic_type_stack.clone(),
+            generic_subst: HashMap::new(),
+            generic_queue: Vec::new(),
+            generic_seen: HashSet::new(),
+            specialization_count: self.specialization_count,
+            generic_depth: 0,
+            generic_chain: Vec::new(),
+        }
+    }
+
     fn error(&mut self, span: Span, msg: String) {
         self.errors.push(Error { span, msg });
     }
@@ -889,6 +930,7 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
     let mut generic_errors = Vec::new();
     for function in generic_functions {
         validate_generic_function(function, &ctx, &mut generic_errors);
+        validate_generic_function_body(function, &ctx, &mut generic_errors);
     }
     ctx.errors.extend(generic_errors);
 
@@ -934,22 +976,15 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
         let params = begin_region(&mut ctx, &mut env, &function.args, &signature.params, None);
         let result = signature.result;
         ctx.callable_result = Some(result);
-        let (body, _) = check_block(&mut ctx, &mut env, &function.body, result);
+        let (mut body, _) = check_block(&mut ctx, &mut env, &function.body, result);
         ctx.callable_result = None;
-        // Specification 016 section 8.1: computed after the body, from the
-        // move state at the exact point it finished, exactly like a block's
-        // own `drops` -- `env` still holds only the parameters here, since
-        // `check_block` always restores `env` to its entry state before
-        // returning. Unused by lowering when the body always returns
-        // (Specification 026 section 10), but harmless to compute regardless.
-        let param_drops = compute_drops(&ctx, &env, 0);
+        append_parameter_drops(&ctx, &env, &mut body);
         typed_funcs.insert(
             name.to_string(),
             TFunc {
                 params,
                 result,
                 body,
-                param_drops,
             },
         );
     }
@@ -981,16 +1016,15 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
             None,
         );
         ctx.callable_result = Some(signature.result);
-        let (body, _) = check_block(&mut ctx, &mut env, &declaration.body, signature.result);
+        let (mut body, _) = check_block(&mut ctx, &mut env, &declaration.body, signature.result);
         ctx.callable_result = None;
-        let param_drops = compute_drops(&ctx, &env, 0);
+        append_parameter_drops(&ctx, &env, &mut body);
         typed_funcs.insert(
             qualified,
             TFunc {
                 params,
                 result: signature.result,
                 body,
-                param_drops,
             },
         );
     }
@@ -1029,13 +1063,9 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
         );
         ctx.current_method = Some(MethodId(index as u32));
         ctx.callable_result = Some(result);
-        let (body, _) = check_block(&mut ctx, &mut env, &declaration.body, result);
+        let (mut body, _) = check_block(&mut ctx, &mut env, &declaration.body, result);
         ctx.callable_result = None;
-        // Specification 016 section 8.1: same reasoning as a function's
-        // `param_drops` above; `self` is never included since `env` never
-        // held a binding for it (a receiver is reached through
-        // `ctx.self_ty`/`PlaceRoot::SelfRef`, never through `env`).
-        let param_drops = compute_drops(&ctx, &env, 0);
+        append_parameter_drops(&ctx, &env, &mut body);
         ctx.current_method = None;
         ctx.self_ty = None;
         typed_methods.push(TMethod {
@@ -1045,7 +1075,6 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
             result,
             writes_receiver: false,
             body,
-            param_drops,
         });
     }
 
@@ -1126,7 +1155,7 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
         ctx.callable_result = Some(result);
         ctx.generic_depth = request_depth;
         let previous_chain = std::mem::replace(&mut ctx.generic_chain, request_chain.clone());
-        let (body, _) = check_block(&mut ctx, &mut env, &function.body, result);
+        let (mut body, _) = check_block(&mut ctx, &mut env, &function.body, result);
         ctx.callable_result = None;
         ctx.generic_depth = 0;
         ctx.generic_chain = previous_chain;
@@ -1147,14 +1176,13 @@ pub fn check<'src>(program: &'src AstProgram<'src>) -> Result<Program, Failure> 
                 request_use_span.end,
             );
         }
-        let param_drops = compute_drops(&ctx, &env, 0);
+        append_parameter_drops(&ctx, &env, &mut body);
         typed_funcs.insert(
             mangled,
             TFunc {
                 params,
                 result,
                 body,
-                param_drops,
             },
         );
     }
@@ -1592,6 +1620,44 @@ fn validate_generic_function<'src>(
     );
 }
 
+/// Runs the ordinary checker over every generic declaration even when no
+/// concrete application is reachable. Private nominal stand-ins preserve the
+/// opacity and distinct identity of each type parameter; the dedicated
+/// capability pass above remains responsible for explaining operations that
+/// are categorically unavailable on unconstrained parameters.
+fn validate_generic_function_body<'src>(
+    function: &Func<'src>,
+    ctx: &Ctx<'src>,
+    errors: &mut Vec<Error>,
+) {
+    let capability_spans: HashSet<(usize, usize)> = errors
+        .iter()
+        .map(|error| (error.span.start, error.span.end))
+        .collect();
+    let mut scratch = ctx.generic_scratch();
+    for (name, _) in &function.generic_params {
+        let id = scratch.types.reserve_generic_parameter(name);
+        scratch.generic_subst.insert(name, Ty::User(id));
+    }
+    let params = resolve_generic_params(&mut scratch, &function.args);
+    let result = function
+        .ret
+        .as_ref()
+        .map(|ty| resolve_type(&mut scratch, ty));
+    let mut env = Env::new();
+    begin_region(&mut scratch, &mut env, &function.args, &params, None);
+    scratch.callable_result = Some(result);
+    let (mut body, _) = check_block(&mut scratch, &mut env, &function.body, result);
+    append_parameter_drops(&scratch, &env, &mut body);
+
+    errors.extend(
+        scratch
+            .errors
+            .into_iter()
+            .filter(|error| !capability_spans.contains(&(error.span.start, error.span.end))),
+    );
+}
+
 /// Starts one function-wide binding region: clears the reserved-name set, binds
 /// every parameter, and records the receiver type for a method.
 fn begin_region<'src>(
@@ -1617,6 +1683,7 @@ fn begin_region<'src>(
             // every read, write, field selection, and receiver use in the body
             // goes through the machinery that already exists for those.
             mutable: param.mode == ParamMode::Reference,
+            scope: 0,
             type_test_alias: false,
         });
     }
@@ -1895,6 +1962,43 @@ fn coerce_bridge_view(ctx: &mut Ctx<'_>, value: TExpr, from: Ty, to: Ty, span: S
         return value;
     }
     coerce(ctx, value, from, to, span)
+}
+
+/// Applies the call-boundary-only owning-sequence-to-view conversion and the
+/// String-to-text-view conversion without consuming the owner. The returned
+/// place is retained for same-call borrow/move overlap validation.
+fn lend_call_view(ctx: &Ctx<'_>, value: &TExpr, from: Ty, to: Ty) -> Option<(TExpr, Place)> {
+    let TExpr::Place(place, _) = value else {
+        return None;
+    };
+    if from == Ty::String && matches!(to, Ty::ViewByte | Ty::ViewUnicode) {
+        return Some((
+            TExpr::ViewFromString(Box::new(TExpr::Place(place.clone(), UseMode::Copy)), to),
+            place.clone(),
+        ));
+    }
+    let source_elem = match from {
+        Ty::Array(id) | Ty::List(id) => match ctx.types.collection(id) {
+            CollectionDef::Array { elem, .. } | CollectionDef::List { elem } => Some(*elem),
+            _ => None,
+        },
+        _ => None,
+    };
+    let target_elem = match to {
+        Ty::View(id) => match ctx.types.collection(id) {
+            CollectionDef::View { elem } => Some(*elem),
+            _ => None,
+        },
+        Ty::ViewByte => Some(Ty::Byte),
+        Ty::ViewUnicode => Some(Ty::Unicode),
+        _ => None,
+    };
+    (source_elem.is_some() && source_elem == target_elem).then(|| {
+        (
+            TExpr::CollectionView(Box::new(TExpr::Place(place.clone(), UseMode::Copy)), to),
+            place.clone(),
+        )
+    })
 }
 
 /// A propagation expression has already selected the successful payload. It
@@ -2196,10 +2300,11 @@ fn is_borrowed_type(ctx: &Ctx<'_>, ty: Ty) -> bool {
                 }
             }
             Ty::Box(id) => visit(ctx, ctx.types.box_pointee(id), seen),
-            Ty::Array(id) | Ty::List(id) | Ty::View(id) => match ctx.types.collection(id) {
-                CollectionDef::Array { elem, .. }
-                | CollectionDef::List { elem }
-                | CollectionDef::View { elem } => visit(ctx, *elem, seen),
+            Ty::View(_) => true,
+            Ty::Array(id) | Ty::List(id) => match ctx.types.collection(id) {
+                CollectionDef::Array { elem, .. } | CollectionDef::List { elem } => {
+                    visit(ctx, *elem, seen)
+                }
                 _ => false,
             },
             Ty::Map(id) => match ctx.types.collection(id) {
@@ -2228,10 +2333,7 @@ fn view_sources(ctx: &Ctx<'_>, value: &TExpr) -> Vec<PlaceRoot> {
     }
 
     match value {
-        TExpr::ViewFromString(value, _) => match value.as_ref() {
-            TExpr::Place(place, _) => vec![place.root.clone()],
-            _ => Vec::new(),
-        },
+        TExpr::ViewFromString(value, _) => view_sources(ctx, value),
         TExpr::CollectionView(value, _) => view_sources(ctx, value),
         TExpr::CollectionSlice { value, .. } => view_sources(ctx, value),
         TExpr::ViewSlice { value, .. } => view_sources(ctx, value),
@@ -2240,8 +2342,8 @@ fn view_sources(ctx: &Ctx<'_>, value: &TExpr) -> Vec<PlaceRoot> {
                 .view_borrows
                 .iter()
                 .find(|borrow| borrow.view_name == *name)
-                .map_or_else(Vec::new, |borrow| borrow.sources.clone()),
-            PlaceRoot::SelfRef => Vec::new(),
+                .map_or_else(|| vec![place.root.clone()], |borrow| borrow.sources.clone()),
+            PlaceRoot::SelfRef => vec![PlaceRoot::SelfRef],
         },
         TExpr::Construct { fields, .. } => {
             let mut sources = Vec::new();
@@ -2386,6 +2488,10 @@ fn prune_view_borrows<'src>(
 ) {
     ctx.view_borrows.retain(|borrow| {
         borrow.scope < scope
+            || borrow.persistent
+            || ctx.cleanup_scopes.iter().flatten().any(|entry| {
+                matches!(entry, TCleanup::Deferred(deferred) if deferred.dependencies.contains(&PlaceRoot::Local(borrow.view_name.clone())))
+            })
             || remaining
                 .iter()
                 .any(|element| element_mentions_local(element, &borrow.view_name))
@@ -2403,6 +2509,32 @@ fn merge_moves(exits: Vec<HashMap<PlaceRoot, Span>>) -> HashMap<PlaceRoot, Span>
     for exit in exits {
         for (root, span) in exit {
             merged.entry(root).or_insert(span);
+        }
+    }
+    merged
+}
+
+/// Conservatively merges borrow provenance at a control-flow join. A view
+/// that can borrow either source protects both until a later assignment or
+/// last-use pruning proves the active path no longer matters.
+fn merge_view_borrows(exits: Vec<Vec<ViewBorrow>>) -> Vec<ViewBorrow> {
+    let mut merged: Vec<ViewBorrow> = Vec::new();
+    for exit in exits {
+        for borrow in exit {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|existing| existing.view_name == borrow.view_name)
+            {
+                for source in borrow.sources {
+                    if !existing.sources.contains(&source) {
+                        existing.sources.push(source);
+                    }
+                }
+                existing.scope = existing.scope.min(borrow.scope);
+                existing.persistent |= borrow.persistent;
+            } else {
+                merged.push(borrow);
+            }
         }
     }
     merged
@@ -2439,11 +2571,25 @@ fn compute_drops(ctx: &Ctx<'_>, env: &Env<'_>, scope: usize) -> Vec<Place> {
     drops
 }
 
+/// Parameters are registered before every body-local cleanup action, so their
+/// drops belong at the end of the body's reverse-registration plan. Keeping
+/// them in that one plan lets a deferred move disarm the corresponding drop
+/// on both successful and error-classified implicit exits.
+fn append_parameter_drops(ctx: &Ctx<'_>, env: &Env<'_>, body: &mut TBlock) {
+    body.cleanup
+        .extend(compute_drops(ctx, env, 0).into_iter().map(TCleanup::Drop));
+}
+
 /// Builds an exit plan from currently armed entries. Returns exit every
 /// currently open lexical scope; `scope_start` lets `break` retain outer
 /// scopes. Parameter drops are added when no local cleanup entry represents
 /// that root.
-fn cleanup_for_exit(ctx: &Ctx<'_>, env: &Env<'_>, scope_start: usize) -> Vec<TCleanup> {
+fn cleanup_for_exit(
+    ctx: &mut Ctx<'_>,
+    env: &Env<'_>,
+    scope_start: usize,
+    error_exit: Option<bool>,
+) -> Vec<TCleanup> {
     let mut entries = Vec::new();
     let mut known_roots = Vec::new();
     for scope in ctx.cleanup_scopes.iter().skip(scope_start) {
@@ -2467,17 +2613,93 @@ fn cleanup_for_exit(ctx: &Ctx<'_>, env: &Env<'_>, scope_start: usize) -> Vec<TCl
         }
     }
     entries.reverse();
+    validate_cleanup_dependencies(ctx, &entries, error_exit);
     entries
 }
 
-fn cleanup_for_exit_from_entries(ctx: &Ctx<'_>, entries: Vec<TCleanup>) -> Vec<TCleanup> {
-    entries
+fn cleanup_for_exit_from_entries(
+    ctx: &mut Ctx<'_>,
+    entries: Vec<TCleanup>,
+    error_exit: Option<bool>,
+) -> Vec<TCleanup> {
+    let entries: Vec<TCleanup> = entries
         .into_iter()
         .filter(|entry| {
             !matches!(entry, TCleanup::Drop(place) if ctx.move_state.contains_key(&place.root))
         })
         .rev()
-        .collect()
+        .collect();
+    validate_cleanup_dependencies(ctx, &entries, error_exit);
+    entries
+}
+
+fn validate_cleanup_dependencies(
+    ctx: &mut Ctx<'_>,
+    entries: &[TCleanup],
+    error_exit: Option<bool>,
+) {
+    let mut unavailable: HashSet<PlaceRoot> = ctx.move_state.keys().cloned().collect();
+    for entry in entries {
+        let TCleanup::Deferred(deferred) = entry else {
+            continue;
+        };
+        if deferred.on_error && error_exit == Some(false) {
+            continue;
+        }
+        for root in &deferred.dependencies {
+            if unavailable.contains(root) {
+                ctx.error(
+                    deferred.span,
+                    format!(
+                        "deferred call cannot use '{root}' at scope exit because its current value is unavailable"
+                    ),
+                );
+            }
+        }
+        unavailable.extend(deferred.consumes.iter().cloned());
+    }
+}
+
+fn is_error_type(ctx: &Ctx<'_>, ty: Ty) -> bool {
+    matches!(ty, Ty::User(id) if ctx.types.def(id).name() == "Error")
+}
+
+/// Classifies an exit result when its active member is statically visible.
+/// `None` means runtime-dependent and therefore requires validating both
+/// unconditional and error-only cleanup paths.
+fn expression_error_exit(ctx: &Ctx<'_>, value: &TExpr) -> Option<bool> {
+    match value {
+        TExpr::Place(place, _) if is_error_type(ctx, place.ty) => Some(true),
+        TExpr::Place(place, _) if matches!(place.ty, Ty::Sum(_)) => None,
+        TExpr::Construct { type_id, .. } if ctx.types.def(*type_id).name() == "Error" => Some(true),
+        TExpr::InjectSum { member, .. } => Some(is_error_type(ctx, *member)),
+        TExpr::LiftSum { value, .. } | TExpr::Represent { value, .. } => {
+            expression_error_exit(ctx, value)
+        }
+        TExpr::If(form) => {
+            let mut facts = form
+                .arms
+                .iter()
+                .filter_map(|(_, block)| block.result.as_ref())
+                .map(|value| expression_error_exit(ctx, value))
+                .collect::<Vec<_>>();
+            if let Some(block) = &form.else_branch
+                && let Some(value) = &block.result
+            {
+                facts.push(expression_error_exit(ctx, value));
+            }
+            facts
+                .first()
+                .copied()
+                .filter(|first| facts.iter().all(|fact| fact == first))
+                .flatten()
+        }
+        TExpr::Call(_, _) | TExpr::MethodCall(_) => None,
+        // A continued `return_on_error` expression necessarily contains its
+        // non-Error success projection; its Error path has already exited.
+        TExpr::ReturnOnError { .. } => Some(false),
+        _ => Some(false),
+    }
 }
 
 enum CheckedReturnOnError {
@@ -2561,7 +2783,7 @@ fn check_return_on_error<'src>(
             return fallback();
         }
         let value = mark_consumed(ctx, env, value, span);
-        let cleanup = cleanup_for_exit(ctx, env, 0);
+        let cleanup = cleanup_for_exit(ctx, env, 0, Some(true));
         return CheckedReturnOnError::Statement(TStmt::ReturnOnError {
             value,
             sum,
@@ -2584,7 +2806,7 @@ fn check_return_on_error<'src>(
         Ty::Sum(ctx.types.intern_sum(reduced))
     };
     let value = mark_consumed(ctx, env, value, span);
-    let cleanup = cleanup_for_exit(ctx, env, 0);
+    let cleanup = cleanup_for_exit(ctx, env, 0, Some(true));
     CheckedReturnOnError::Expr {
         value: TExpr::ReturnOnError {
             value: Box::new(value),
@@ -2623,6 +2845,7 @@ fn check_block<'src>(
     expected: Option<Ty>,
 ) -> (TBlock, bool) {
     let scope = env.len();
+    let borrow_scope = ctx.cleanup_scopes.len();
     ctx.cleanup_scopes.push(Vec::new());
     let mut statements = Vec::new();
     let mut result = None;
@@ -2630,7 +2853,7 @@ fn check_block<'src>(
     let mut reported_unreachable = false;
     let last = block.elements.len().wrapping_sub(1);
     for (index, element) in block.elements.iter().enumerate() {
-        prune_view_borrows(ctx, &block.elements[index..], scope);
+        prune_view_borrows(ctx, &block.elements[index..], borrow_scope);
         // Specification 026 section 7: only the first unreachable element is
         // reported; flow bookkeeping below still runs for dead code (using
         // `|=` so a later, non-returning nested construct can never make an
@@ -2758,14 +2981,19 @@ fn check_block<'src>(
     let cleanup = if returns {
         Vec::new()
     } else {
-        cleanup_for_exit_from_entries(ctx, cleanup)
+        let error_exit = result
+            .as_ref()
+            .and_then(|value| expression_error_exit(ctx, value));
+        cleanup_for_exit_from_entries(ctx, cleanup, error_exit)
     };
-    ctx.view_borrows.retain(|borrow| borrow.scope < scope);
+    ctx.view_borrows
+        .retain(|borrow| borrow.scope < borrow_scope);
     env.truncate(scope);
     (
         TBlock {
             statements,
             result,
+            result_ty: expected,
             cleanup,
         },
         returns,
@@ -2800,7 +3028,13 @@ fn check_arm_condition<'src>(
                         Some(checked) => {
                             // Specification 016 section 7.3: the binding
                             // shares the tested place's root mutability.
-                            bind_type_test(env, test.binding, &checked.binding, mutable);
+                            bind_type_test(
+                                env,
+                                test.binding,
+                                &checked.binding,
+                                mutable,
+                                ctx.cleanup_scopes.len(),
+                            );
                             TCondition::Test(checked)
                         }
                         None => TCondition::Expr(TExpr::Bool(false)),
@@ -2808,7 +3042,13 @@ fn check_arm_condition<'src>(
                 }
                 Ty::Sum(sum) => match check_sum_type_test(ctx, test, place, sum) {
                     Some(checked) => {
-                        bind_type_test(env, test.binding, &checked.binding, mutable);
+                        bind_type_test(
+                            env,
+                            test.binding,
+                            &checked.binding,
+                            mutable,
+                            ctx.cleanup_scopes.len(),
+                        );
                         TCondition::SumTest(checked)
                     }
                     None => TCondition::Expr(TExpr::Bool(false)),
@@ -2840,12 +3080,14 @@ fn bind_type_test<'src>(
     written: Option<Spanned<&'src str>>,
     checked: &Option<(String, Ty)>,
     mutable: bool,
+    scope: usize,
 ) {
     if let (Some((name, _)), Some((_, ty))) = (written, checked) {
         env.push(Binding {
             name,
             ty: *ty,
             mutable,
+            scope,
             // Specification 016 section 7.3: the binding is a branch-scoped
             // alias to the tested place's active payload, never an
             // independent owning root, so `mark_consumed` must reject
@@ -2986,12 +3228,15 @@ fn check_if<'src>(
     // state, so each is checked against a fresh snapshot rather than the
     // previous arm's leftover moves.
     let entry = ctx.move_state.clone();
+    let entry_views = ctx.view_borrows.clone();
     let mut arms = Vec::new();
     let mut spans = Vec::new();
     let mut exits = Vec::new();
+    let mut view_exits = Vec::new();
     let mut arm_returns = Vec::new();
     for (condition, body) in &form.arms {
         ctx.move_state = entry.clone();
+        ctx.view_borrows = entry_views.clone();
         let scope = env.len();
         let checked_condition = check_arm_condition(ctx, env, condition);
         let (checked_body, returns) = check_block(ctx, env, body, expected);
@@ -3002,6 +3247,7 @@ fn check_if<'src>(
         // not a real predecessor there and must not be merged into it.
         if !returns {
             exits.push(ctx.move_state.clone());
+            view_exits.push(ctx.view_borrows.clone());
         }
         arm_returns.push(returns);
         arms.push((checked_condition, checked_body));
@@ -3019,9 +3265,11 @@ fn check_if<'src>(
                 );
             }
             ctx.move_state = entry.clone();
+            ctx.view_borrows = entry_views.clone();
             let (checked, returns) = check_block(ctx, env, body, expected);
             if !returns {
                 exits.push(ctx.move_state.clone());
+                view_exits.push(ctx.view_borrows.clone());
             }
             else_returns = returns;
             Some(checked)
@@ -3058,6 +3306,7 @@ fn check_if<'src>(
     // moves for the rest of a malformed program.
     if !covers_every_path {
         exits.push(entry.clone());
+        view_exits.push(entry_views.clone());
     }
     let if_returns =
         covers_every_path && arm_returns.iter().all(|returns| *returns) && else_returns;
@@ -3065,6 +3314,11 @@ fn check_if<'src>(
         entry
     } else {
         merge_moves(exits)
+    };
+    ctx.view_borrows = if view_exits.is_empty() {
+        entry_views
+    } else {
+        merge_view_borrows(view_exits)
     };
     match expected {
         // Specification 026 section 6: every reachable branch returning
@@ -3113,6 +3367,16 @@ fn check_defer<'src>(
         ctx.move_state = move_state;
         return None;
     };
+    // Checking the stored call exposes every root its eventual evaluation may
+    // consume, including roots consumed inside nested argument calls. The
+    // defer declaration only arms that evaluation, so restore availability
+    // after recording the delta for exit-time cleanup validation.
+    let consumes = ctx
+        .move_state
+        .keys()
+        .filter(|root| !move_state.contains_key(*root))
+        .cloned()
+        .collect();
     ctx.move_state = move_state;
     let statement = match checked {
         CheckedCall::Function {
@@ -3152,28 +3416,18 @@ fn check_defer<'src>(
             return None;
         }
     }
-    let consumes = consuming_roots(&statement);
+    let dependencies = env
+        .iter()
+        .filter(|binding| expr_mentions_local(&call.0, binding.name))
+        .map(|binding| PlaceRoot::Local(binding.name.to_string()))
+        .collect();
     Some(TDeferred {
         on_error,
         call: statement,
+        span,
+        dependencies,
         consumes,
     })
-}
-
-fn consuming_roots(statement: &TStmt) -> Vec<PlaceRoot> {
-    let args = match statement {
-        TStmt::Call(_, args) => args,
-        TStmt::MethodCall(call) => &call.args,
-        _ => return Vec::new(),
-    };
-    args.iter()
-        .filter_map(|arg| match arg {
-            TArg::Value(TExpr::Place(place, UseMode::Consume)) if place.path.is_empty() => {
-                Some(place.root.clone())
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 fn check_stmt<'src>(
@@ -3206,15 +3460,23 @@ fn check_stmt<'src>(
                 name,
                 ty: declared,
                 mutable: *mutable,
+                scope: ctx.cleanup_scopes.len().saturating_sub(1),
                 type_test_alias: false,
             });
             if is_borrowed_type(ctx, declared) {
                 let sources = view_sources(ctx, &checked);
-                if !sources.is_empty() {
+                if sources.is_empty() {
+                    ctx.error(
+                        value.1,
+                        "a stored view requires a named owning source; this temporary would not live long enough"
+                            .into(),
+                    );
+                } else {
                     ctx.view_borrows.push(ViewBorrow {
                         view_name: (*name).to_string(),
                         sources,
                         scope: ctx.cleanup_scopes.len().saturating_sub(1),
+                        persistent: false,
                     });
                 }
             }
@@ -3357,13 +3619,28 @@ fn check_stmt<'src>(
                     if resolved.place.path.is_empty() && is_borrowed_type(ctx, resolved.place.ty) {
                         let root_name = resolved.place.root.to_string();
                         let sources = view_sources(ctx, &checked);
+                        let binding_scope = env
+                            .iter()
+                            .rev()
+                            .find(|binding| binding.name == root_name)
+                            .map_or_else(
+                                || ctx.cleanup_scopes.len().saturating_sub(1),
+                                |binding| binding.scope,
+                            );
                         ctx.view_borrows
                             .retain(|borrow| borrow.view_name != root_name);
-                        if !sources.is_empty() {
+                        if sources.is_empty() {
+                            ctx.error(
+                                value.1,
+                                "a stored view requires a named owning source; this temporary would not live long enough"
+                                    .into(),
+                            );
+                        } else {
                             ctx.view_borrows.push(ViewBorrow {
                                 view_name: root_name,
                                 sources,
-                                scope: ctx.cleanup_scopes.len().saturating_sub(1),
+                                scope: binding_scope,
+                                persistent: false,
                             });
                         }
                     }
@@ -3420,10 +3697,12 @@ fn check_stmt<'src>(
             // one real pass's entry and exit finds every root the loop can
             // legitimately double-move without needing to re-run the body.
             let pre = ctx.move_state.clone();
+            let pre_views = ctx.view_borrows.clone();
             ctx.loops.push(ctx.cleanup_scopes.len());
             let (body, body_returns) = check_block(ctx, env, body, None);
             ctx.loops.pop();
             let post = ctx.move_state.clone();
+            let post_views = ctx.view_borrows.clone();
             for (root, move_span) in &post {
                 if !pre.contains_key(root) {
                     ctx.error(
@@ -3449,6 +3728,11 @@ fn check_stmt<'src>(
                 pre
             } else {
                 merge_moves(vec![pre, post])
+            };
+            ctx.view_borrows = if body_returns {
+                pre_views
+            } else {
+                merge_view_borrows(vec![pre_views, post_views])
             };
             TStmt::While { condition, body }
         }
@@ -3532,11 +3816,14 @@ fn check_stmt<'src>(
                 declare(ctx, name, name_span, "Loop variable");
                 name.to_string()
             });
+            let pre = ctx.move_state.clone();
+            let pre_views = ctx.view_borrows.clone();
             let scope = env.len();
             env.push(Binding {
                 name: value.0,
                 ty: value_ty,
                 mutable: false,
+                scope: ctx.cleanup_scopes.len(),
                 type_test_alias: true,
             });
             if let Some((name, _)) = key {
@@ -3544,13 +3831,45 @@ fn check_stmt<'src>(
                     name,
                     ty: key_ty.unwrap_or(Ty::Nil),
                     mutable: false,
+                    scope: ctx.cleanup_scopes.len(),
                     type_test_alias: true,
                 });
             }
+            let iteration_sources = view_sources(ctx, &checked_iterable);
+            if !iteration_sources.is_empty() {
+                ctx.view_borrows.push(ViewBorrow {
+                    view_name: format!("for {}", value.0),
+                    sources: iteration_sources,
+                    scope: ctx.cleanup_scopes.len(),
+                    persistent: true,
+                });
+            }
             ctx.loops.push(ctx.cleanup_scopes.len());
-            let (checked_body, _) = check_block(ctx, env, body, None);
+            let (checked_body, body_returns) = check_block(ctx, env, body, None);
             ctx.loops.pop();
             env.truncate(scope);
+            let post = ctx.move_state.clone();
+            let post_views = ctx.view_borrows.clone();
+            for (root, move_span) in &post {
+                if !pre.contains_key(root) {
+                    ctx.error(
+                        *move_span,
+                        format!(
+                            "'{root}' is moved here, but this is inside a 'for' body, so a later iteration would find '{root}' already moved"
+                        ),
+                    );
+                }
+            }
+            ctx.move_state = if body_returns {
+                pre
+            } else {
+                merge_moves(vec![pre, post])
+            };
+            ctx.view_borrows = if body_returns {
+                pre_views
+            } else {
+                merge_view_borrows(vec![pre_views, post_views])
+            };
             TStmt::For {
                 value_name: value.0.to_string(),
                 value_ty,
@@ -3569,7 +3888,7 @@ fn check_stmt<'src>(
                 );
             }
             let cleanup = if let Some(scope_start) = ctx.loops.last().copied() {
-                cleanup_for_exit(ctx, env, scope_start)
+                cleanup_for_exit(ctx, env, scope_start, Some(false))
             } else {
                 Vec::new()
             };
@@ -3701,10 +4020,13 @@ fn check_return<'src>(
     };
     // Specification 026 section 8: the result above is fully materialized
     // (and, for a moved root, marked unavailable) before this cleanup plan is
-    // computed, exactly like a function's own `param_drops` -- every scope
+    // computed, exactly like a function's parameter-drop cleanup -- every scope
     // still open at this point, innermost first, is included in one flat
     // list because `env`'s declaration order already nests that way.
-    let cleanup = cleanup_for_exit(ctx, env, 0);
+    let error_exit = checked_value
+        .as_ref()
+        .and_then(|value| expression_error_exit(ctx, value));
+    let cleanup = cleanup_for_exit(ctx, env, 0, error_exit);
     TStmt::Return {
         value: checked_value,
         result: expected,
@@ -3967,6 +4289,8 @@ fn builtin_type_name(name: &str) -> Option<TypeName> {
         "Int64" => TypeName::Int64,
         "Bool" => TypeName::Bool,
         "Nil" => TypeName::Nil,
+        "String" => TypeName::String,
+        "Unicode" => TypeName::Unicode,
         "Byte" => TypeName::Byte,
         "UInt16" => TypeName::UInt16,
         "UInt32" => TypeName::UInt32,
@@ -4298,6 +4622,9 @@ fn check_map_set_method<'src>(
         );
         return Some(CheckedCall::Value(TExpr::Nil, Ty::Nil));
     }
+    if matches!(name, "insert" | "delete" | "take" | "clear" | "reserve") {
+        reject_live_view_source(ctx, &receiver.root, span);
+    }
     match (kind, name) {
         (0, "insert") => {
             reject_named_args(ctx, "Map.insert", args);
@@ -4321,6 +4648,7 @@ fn check_map_set_method<'src>(
             let key = mark_consumed(ctx, env, key, args[0].value.1);
             let (value, found) = check_expr(ctx, env, &args[1].value);
             let value_ty = value_ty.expect("map operation has a value type");
+            let value = mark_consumed(ctx, env, value, args[1].value.1);
             let value = coerce(ctx, value, found, value_ty, args[1].value.1);
             Some(CheckedCall::Value(
                 TExpr::MapInsert {
@@ -4515,6 +4843,15 @@ fn check_map_set_method<'src>(
             if !mutable {
                 ctx.error(span, "Set.clear requires a mutable set receiver".into());
             }
+            if !args.is_empty() {
+                ctx.error(
+                    span,
+                    format!("Set.clear expects no arguments, found {}", args.len()),
+                );
+                for arg in args {
+                    check_expr(ctx, env, &arg.value);
+                }
+            }
             Some(CheckedCall::Statement(TStmt::SetClear {
                 receiver,
                 elem: key_ty,
@@ -4553,10 +4890,9 @@ fn check_map_set_method<'src>(
     }
 }
 
-/// Checks the deliberately closed mutation surface currently exposed for
-/// lists. The runtime path copies scalar bytes, so accepting only scalar
-/// elements keeps `push` and `clear` correct until element destruction and
-/// general collection ownership are implemented.
+/// Checks the deliberately closed mutation surface exposed for lists. Scalar
+/// elements use typed runtime entry points; all other storable elements use
+/// the compiler-generated ownership descriptor and opaque-byte entry points.
 fn check_list_mutation<'src>(
     ctx: &mut Ctx<'src>,
     env: &mut Env<'src>,
@@ -4573,6 +4909,12 @@ fn check_list_mutation<'src>(
         CollectionDef::List { elem } => *elem,
         _ => unreachable!("list type has non-list metadata"),
     };
+    if matches!(
+        name,
+        "push" | "pop" | "insert" | "remove" | "clear" | "reserve"
+    ) {
+        reject_live_view_source(ctx, &receiver.root, span);
+    }
     match name {
         "push" => {
             reject_named_args(ctx, "a List.push call", args);
@@ -5163,6 +5505,7 @@ fn check_args<'src>(
     let mut checked = Vec::with_capacity(args.len());
     let mut references: Vec<(String, Place, Span)> = Vec::new();
     let mut moves: Vec<(String, Place, Span)> = Vec::new();
+    let mut lends: Vec<(String, Place, Span)> = Vec::new();
     for (index, arg) in args.iter().enumerate() {
         // An argument with no parameter is already reported as an arity error;
         // it is still checked so its own diagnostics are not swallowed.
@@ -5172,10 +5515,16 @@ fn check_args<'src>(
         };
         match param.mode {
             ParamMode::Value => {
-                let (value, ty) = check_expr(ctx, env, &arg.value);
-                // Specification 016 section 6.1: a by-value argument is a
-                // consuming context.
-                let value = mark_consumed(ctx, env, value, arg.value.1);
+                let (mut value, mut ty) = check_expr(ctx, env, &arg.value);
+                if let Some((lent, place)) = lend_call_view(ctx, &value, ty, param.ty) {
+                    lends.push((param.name.clone(), place, arg.value.1));
+                    value = lent;
+                    ty = param.ty;
+                } else {
+                    // Specification 016 section 6.1: an ordinary by-value
+                    // argument consumes a move-only owning root.
+                    value = mark_consumed(ctx, env, value, arg.value.1);
+                }
                 // Specification 016 section 7.2's closing sentence: a
                 // borrowed allocation cannot be simultaneously moved, so a
                 // whole-root move-only argument joins the same overlap
@@ -5203,6 +5552,20 @@ fn check_args<'src>(
         }
     }
     reject_overlap(ctx, &references, &moves, receiver);
+    for (name, lent, span) in &lends {
+        for (moved_name, moved, _) in &moves {
+            if overlaps(lent, moved) {
+                ctx.error(
+                    *span,
+                    format!(
+                        "view argument '{}' for parameter '{name}' overlaps the moved argument '{}' for parameter '{moved_name}'",
+                        ctx.place_name(lent),
+                        ctx.place_name(moved)
+                    ),
+                );
+            }
+        }
+    }
     checked
 }
 

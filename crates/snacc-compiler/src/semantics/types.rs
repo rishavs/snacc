@@ -51,7 +51,7 @@ impl SumId {
 /// resolution (`resolve_type` in `checker.rs`) each hold one `SumTable` across
 /// a whole compilation; `Builder`'s table moves into the finished [`Types`]
 /// once collection ends, so ids stay stable and no sum is interned twice.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SumTable {
     members: Vec<Vec<Ty>>,
     index: HashMap<Vec<Ty>, SumId>,
@@ -118,7 +118,7 @@ pub enum CollectionDef {
     Set { elem: Ty },
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CollectionTable {
     defs: Vec<CollectionDef>,
     index: HashMap<CollectionDef, CollectionId>,
@@ -148,7 +148,7 @@ impl CollectionTable {
 /// box's whole identity is its one pointee type (Specification 016 section
 /// 4.1), so two occurrences of `Box<Int64>` share one [`Ty::Box`] id and no
 /// separate member-set normalization is needed the way a sum needs.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BoxTable {
     pointees: Vec<Ty>,
     index: HashMap<Ty, BoxId>,
@@ -263,6 +263,7 @@ impl TypeDef {
 }
 
 /// A method's resolved signature. Bodies are checked separately.
+#[derive(Clone)]
 pub struct MethodSig {
     pub receiver: TypeId,
     pub name: String,
@@ -279,6 +280,7 @@ impl MethodSig {
 }
 
 /// The resolved type table plus the name maps resolution needs.
+#[derive(Clone)]
 pub struct Types {
     pub defs: Vec<TypeDef>,
     top_level: HashMap<String, TypeId>,
@@ -507,6 +509,20 @@ impl Types {
         self.equality.push(false);
         self.move_only.push(false);
         self.generic_specializations.insert(key, id);
+        id
+    }
+
+    /// Creates a private nominal stand-in used only by the isolated generic
+    /// template checker. Distinct parameters receive distinct identities, so
+    /// ordinary checking cannot accidentally unify `T` and `U`.
+    pub fn reserve_generic_parameter(&mut self, name: &str) -> TypeId {
+        let id = TypeId(self.defs.len() as u32);
+        self.defs.push(TypeDef::Struct {
+            name: name.to_string(),
+            fields: Vec::new(),
+        });
+        self.equality.push(false);
+        self.move_only.push(false);
         id
     }
 

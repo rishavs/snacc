@@ -9,3 +9,13 @@ values.reserve(10)
 print(values.capacity())
 values.clear()
 print(values.length())
+
+let mut words: List<String> = ["a", "b"]
+let word: String = "c"
+words.push(word)
+let middle: String = words.remove(1)
+print(middle)
+let last_word: String = words.pop()
+print(last_word)
+words.clear()
+print(words.length())
