@@ -1,4 +1,4 @@
-# RFC 022: Source File Decomposition and Dependency Offloading
+# RFC 029: Source File Decomposition and Dependency Offloading
 
 Status: Proposed
 
@@ -85,8 +85,8 @@ Permitted exceptions after this refactor:
 
 | File | Expected size | Reason |
 | --- | ---: | --- |
-| `backend/lower/expr.rs` | ~900 | One exhaustive match over expression variants |
-| `semantics/types.rs` | ~700 | One type table with cohesive resolution rules |
+| `llvm/lower/expr.rs` | ~900 | One exhaustive match over expression variants |
+| `types.rs` | ~700 | One type table with cohesive resolution rules |
 
 Everything else is expected under 500 lines. A future file that exceeds it
 either splits or is added to this table with a reason.
@@ -104,49 +104,46 @@ should move another helper group out rather than widen the exception.
 crates/snacc-compiler/src/
   lib.rs
   diagnostics.rs
-  syntax/
+  ast.rs
+  lexer/
     mod.rs
-    ast.rs
-    lexer/
-      mod.rs          tokens, keyword table, driver
-      numeric.rs      radix, suffix, separator, range rules
-      text.rs         string, raw string, interpolation, Unicode scalars
-    parser/
-      mod.rs          entry point and item parsing
-      types.rs        type syntax, sums, parameterized forms
-      expr.rs         expression and postfix parsing
-      stmt.rs         blocks, declarations, control flow
-  semantics/
+    numeric.rs        radix, suffix, separator, range rules
+    text.rs           string, raw string, interpolation, Unicode scalars
+  parser/
+    mod.rs            entry point and item parsing
+    types.rs          type syntax, sums, parameterized forms
+    expr.rs           expression and postfix parsing
+    stmt.rs           blocks, declarations, control flow
+  types.rs
+  checker/
     mod.rs
-    types.rs          resolved type table
-    checker/
-      mod.rs          entry point, Ctx, program walk
-      program.rs      declaration collection, signatures, generics
-      expr.rs         expression checking
-      stmt.rs         statement and block checking
-      places.rs       places, moves, borrows, view liveness
-      calls.rs        call, method, constructor, bridge argument checking
-      convert.rs      coercion, common types, injection
-  backend/
+    program.rs        declaration collection, signatures, generics
+    expr.rs           expression checking
+    stmt.rs           statement and block checking
+    places.rs         places, moves, borrows, view liveness
+    calls.rs          call, method, constructor, bridge argument checking
+    convert.rs        coercion, common types, injection
+  llvm/
     mod.rs
-    llvm/
-      mod.rs          module construction, entry points
-      types.rs        LLVM type mapping and layout
-      imports.rs      runtime import declarations (table-driven)
-      symbols.rs      runtime symbol name construction (table-driven)
-      lower/
-        mod.rs        Codegen struct and shared helpers
-        expr.rs       expression lowering
-        stmt.rs       statement lowering
-        equality.rs   structural equality lowering
-        cleanup.rs    drop and cleanup lowering
-        collections.rs list, map, set operation lowering
+    types.rs          LLVM type mapping and layout
+    imports.rs        runtime import declarations (table-driven)
+    symbols.rs        runtime symbol name construction (table-driven)
+    lower/
+      mod.rs          Codegen struct and shared helpers
+      expr.rs         expression lowering
+      stmt.rs         statement and block lowering
+      equality.rs     structural equality lowering
+      cleanup.rs      drop and cleanup lowering
+      collections.rs  list, map, set operation lowering
 ~~~
 
 `Codegen` keeps one struct with its `impl` blocks split across the `lower/`
 modules. Rust permits multiple `impl` blocks for one type in one crate, so this
 requires no trait, no field changes, and no visibility widening beyond
-`pub(crate)`.
+`pub(crate)`. The phase names are direct modules: there is no `syntax/`,
+`semantics/`, or `backend/` umbrella. `llvm/` is the concrete backend because
+Snacc has one backend; a future second backend may introduce an umbrella only
+when that additional implementation exists.
 
 ### 6.2 `snacc-runtime`
 
@@ -212,7 +209,7 @@ apps/snacc-workbench/src/
 and then declares each result through one of 46 `*_import` methods whose bodies
 differ only in signature.
 
-Both collapse into one table in `backend/llvm/symbols.rs`:
+Both collapse into one table in `llvm/symbols.rs`:
 
 ~~~rust
 struct RuntimeImport {
@@ -289,7 +286,7 @@ Expected effect: 5,709 lines leave production files. `checker.rs` drops to
 
 ### Phase 2: split the checker
 
-1. Create `semantics/checker/` and move the checked-IR type definitions,
+1. Create `checker/` and move the checked-IR type definitions,
    `Ctx`, and the program walk into `mod.rs`.
 2. Move the existing function groups into `program.rs`, `expr.rs`, `stmt.rs`,
    `places.rs`, `calls.rs`, and `convert.rs` along the boundaries the current
@@ -298,7 +295,7 @@ Expected effect: 5,709 lines leave production files. `checker.rs` drops to
 
 ### Phase 3: split the backend
 
-1. Create `backend/llvm/` and move type mapping, layout, and entry points.
+1. Create `llvm/` and move type mapping, layout, and entry points.
 2. Split `impl Codegen` across `lower/` modules as additional `impl` blocks.
 3. Split `expr` and `stmt` by delegating each match arm group to a private
    method in the owning module. The match arms themselves move unchanged.
