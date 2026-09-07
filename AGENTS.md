@@ -96,6 +96,7 @@ beside the operation it protects.
 
 - Follow existing structure, naming, diagnostics, and test patterns.
 - Keep changes scoped and add focused tests.
+- Keep production `.rs` files within the soft 500-line target (Specification 029 section 5). A file over 500 lines is acceptable only as one cohesive unit with a recorded reason in `crates/snacc-compiler/tests/file_size_guard.rs`; otherwise split it or add it there with a reason.
 - Before handoff, run `cargo fmt`, `cargo check`, and relevant `cargo test` suites.
 - This directory is not a Git repository; do not run Git commands here.
 

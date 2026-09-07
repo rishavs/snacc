@@ -7,6 +7,22 @@ use std::{
 use tempfile::{Builder, TempDir};
 
 const RUNTIME_SOURCE: &str = include_str!("../../snacc-runtime/src/lib.rs");
+
+/// One entry per runtime module beside `lib.rs` (Specification 029 Phase 5).
+/// The generated host compiles beside these files so its `mod` declarations
+/// resolve exactly as they do in the Cargo build.
+const RUNTIME_MODULES: &[(&str, &str)] = &[
+    ("print.rs", include_str!("../../snacc-runtime/src/print.rs")),
+    (
+        "string.rs",
+        include_str!("../../snacc-runtime/src/string.rs"),
+    ),
+    ("view.rs", include_str!("../../snacc-runtime/src/view.rs")),
+    ("list.rs", include_str!("../../snacc-runtime/src/list.rs")),
+    ("map.rs", include_str!("../../snacc-runtime/src/map.rs")),
+    ("set.rs", include_str!("../../snacc-runtime/src/set.rs")),
+    ("fail.rs", include_str!("../../snacc-runtime/src/fail.rs")),
+];
 const HOST_SUFFIX: &str = r#"
 
 unsafe extern "C" {
@@ -56,6 +72,48 @@ impl BuiltExecutable {
     }
 }
 
+/// Locates the `paste` proc-macro artifact the workspace build produced, so
+/// the temporary host crate expands the runtime's macros with the same
+/// toolchain that built this driver. Searches `deps` directories beside the
+/// running executable upward through the Cargo target layout.
+fn paste_library() -> Option<PathBuf> {
+    const EXTENSIONS: &[&str] = if cfg!(windows) {
+        &["dll"]
+    } else if cfg!(target_os = "macos") {
+        &["dylib"]
+    } else {
+        &["so"]
+    };
+    const PREFIX: &str = if cfg!(windows) { "paste-" } else { "libpaste-" };
+    let mut directory = std::env::current_exe().ok()?;
+    directory.pop();
+    for _ in 0..5 {
+        for candidate in [directory.join("deps"), directory.clone()] {
+            if let Ok(entries) = fs::read_dir(&candidate) {
+                let mut hits: Vec<PathBuf> = entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.starts_with(PREFIX)
+                                    && EXTENSIONS.iter().any(|extension| name.ends_with(extension))
+                            })
+                    })
+                    .collect();
+                hits.sort();
+                if let Some(hit) = hits.into_iter().next() {
+                    return Some(hit);
+                }
+            }
+        }
+        if !directory.pop() {
+            return None;
+        }
+    }
+    None
+}
+
 pub fn build(source: &str) -> Result<BuiltExecutable, DriverError> {
     let directory = Builder::new()
         .prefix("snacc-build-")
@@ -82,10 +140,22 @@ pub fn build(source: &str) -> Result<BuiltExecutable, DriverError> {
         format!("{RUNTIME_SOURCE}{abi_assertion}{HOST_SUFFIX}"),
     )
     .map_err(|error| DriverError::Filesystem(format!("failed to write generated host: {error}")))?;
+    for &(name, source) in RUNTIME_MODULES {
+        fs::write(directory.path().join(name), source).map_err(|error| {
+            DriverError::Filesystem(format!("failed to write runtime module '{name}': {error}"))
+        })?;
+    }
+    let paste = paste_library().ok_or_else(|| {
+        DriverError::Tool(
+            "the Snacc runtime macros need the workspace's paste artifact beside this driver; build through Cargo so it exists".into(),
+        )
+    })?;
 
     let status = Command::new("rustc")
         .arg("--edition=2024")
         .arg(&host_path)
+        .arg("--extern")
+        .arg(format!("paste={}", paste.display()))
         .arg("-C")
         .arg(format!("link-arg={}", object_path.display()))
         .arg("-o")

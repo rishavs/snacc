@@ -1,14 +1,17 @@
-mod backend;
+mod ast;
+mod checker;
 mod diagnostics;
-mod semantics;
-mod syntax;
+mod lexer;
+mod llvm;
+mod parser;
+mod types;
 
 use chumsky::prelude::*;
 
+pub use ast::{ParamMode, Program as AstProgram};
+pub use checker::{Program, TParam, Ty};
 pub use diagnostics::{Diagnostic, DiagnosticPhase, Diagnostics};
-pub use semantics::checker::{Program, TParam, Ty};
-pub use semantics::types::CollectionDef;
-pub use syntax::ast::{ParamMode, Program as AstProgram};
+pub use types::CollectionDef;
 
 /// Contract version for generated objects, runtime imports, and Rust bridges.
 pub const ABI_VERSION: u32 = 12;
@@ -50,7 +53,7 @@ pub struct EmittedObject {
 }
 
 pub fn parse<'src>(source: &'src str) -> Result<AstProgram<'src>, Diagnostics> {
-    let (tokens, lex_errors) = syntax::lexer::lexer().parse(source).into_output_errors();
+    let (tokens, lex_errors) = lexer::lexer().parse(source).into_output_errors();
     if !lex_errors.is_empty() {
         return Err(Diagnostics::from_rich(DiagnosticPhase::Lex, lex_errors));
     }
@@ -58,7 +61,7 @@ pub fn parse<'src>(source: &'src str) -> Result<AstProgram<'src>, Diagnostics> {
         return Err(Diagnostics::internal("lexer produced no token stream"));
     };
 
-    let (program, parse_errors) = syntax::parser::program_parser()
+    let (program, parse_errors) = parser::program_parser()
         .parse(
             tokens
                 .as_slice()
@@ -75,8 +78,8 @@ pub fn parse<'src>(source: &'src str) -> Result<AstProgram<'src>, Diagnostics> {
 
 pub fn check(source: &str) -> Result<Program, Diagnostics> {
     let syntax = parse(source)?;
-    semantics::checker::check(&syntax).map_err(|failure| match failure {
-        semantics::checker::Failure::Source(errors) => Diagnostics {
+    checker::check(&syntax).map_err(|failure| match failure {
+        checker::Failure::Source(errors) => Diagnostics {
             items: errors
                 .into_iter()
                 .map(|error| Diagnostic {
@@ -86,7 +89,7 @@ pub fn check(source: &str) -> Result<Program, Diagnostics> {
                 })
                 .collect(),
         },
-        semantics::checker::Failure::Unknown(detail) => Diagnostics::internal(detail),
+        checker::Failure::Unknown(detail) => Diagnostics::internal(detail),
     })
 }
 
@@ -99,7 +102,7 @@ pub fn emit_object(source: &str) -> Result<Vec<u8>, Diagnostics> {
 /// no object file preserves, can be inspected.
 pub fn emit_llvm_ir(source: &str) -> Result<String, Diagnostics> {
     let program = check(source)?;
-    backend::llvm::compile_to_ir(&program, "snacc").map_err(backend_failure)
+    llvm::compile_to_ir(&program, "snacc").map_err(backend_failure)
 }
 
 /// Specification 010 section 19 phase 5 step 7: a lowering failure the backend
@@ -107,18 +110,18 @@ pub fn emit_llvm_ir(source: &str) -> Result<String, Diagnostics> {
 /// invariant the checker promised and did not deliver -- is reported as an
 /// internal error rather than an ordinary backend diagnostic.
 fn backend_failure(error: String) -> Diagnostics {
-    match error.strip_prefix(backend::llvm::INTERNAL_ERROR) {
+    match error.strip_prefix(llvm::INTERNAL_ERROR) {
         Some(detail) => Diagnostics::internal(detail.to_string()),
         None => Diagnostics::backend(error),
     }
 }
 
 pub fn target_triple() -> String {
-    backend::llvm::target_triple()
+    llvm::target_triple()
 }
 
 pub fn llvm_version() -> (u32, u32, u32) {
-    backend::llvm::llvm_version()
+    llvm::llvm_version()
 }
 
 pub fn emit_object_with_options(
@@ -126,7 +129,7 @@ pub fn emit_object_with_options(
     options: CompileOptions,
 ) -> Result<EmittedObject, Diagnostics> {
     let program = check(source)?;
-    let result = backend::llvm::compile(&program, "snacc", options.optimization);
+    let result = llvm::compile(&program, "snacc", options.optimization);
     result
         .map(|(bytes, target_triple)| EmittedObject {
             bytes,

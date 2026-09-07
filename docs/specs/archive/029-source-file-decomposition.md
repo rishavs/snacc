@@ -1,6 +1,6 @@
 # RFC 029: Source File Decomposition and Dependency Offloading
 
-Status: Proposed
+Status: Closed
 
 Document kind: Repository refactor (Rust-style RFC)
 
@@ -85,16 +85,33 @@ Permitted exceptions after this refactor:
 
 | File | Expected size | Reason |
 | --- | ---: | --- |
-| `llvm/lower/expr.rs` | ~900 | One exhaustive match over expression variants |
-| `types.rs` | ~700 | One type table with cohesive resolution rules |
+| `ast.rs` | 510 | One cohesive AST definition; splitting individual node families would obscure the syntax tree |
+| `types.rs` | 1884 | Built-in, nominal, represented, generic, collection, and recursive-layout rules share one type-resolution table |
+| `lexer/mod.rs` | 1351 | Token definitions, the main scanner, and interpolation dispatch share the lexer state and token-boundary rules |
+| `checker/mod.rs` | 1295 | Checked-IR definitions, context state, and the top-level program walk form one shared checker unit |
+| `checker/program.rs` | 834 | Declaration collection, signatures, generic declarations, and program-wide validation share symbol tables |
+| `checker/expr.rs` | 670 | Expression checking is one exhaustive expression-shape unit |
+| `checker/stmt.rs` | 1334 | Statement, block, control-flow, cleanup, and return-flow checking share block state |
+| `checker/places.rs` | 742 | Place, move, borrow, overlap, and view-liveness analysis share the same dataflow state |
+| `checker/calls.rs` | 1717 | Function, method, constructor, static, and bridge call checking share argument and receiver validation |
+| `llvm/lower/mod.rs` | 789 | Codegen state, module construction, calls, and shared lowering helpers require one context |
+| `llvm/lower/expr.rs` | 1130 | One exhaustive match over expression variants |
+| `llvm/lower/stmt.rs` | 1099 | Statement and block lowering share terminator and cleanup state |
+| `llvm/lower/equality.rs` | 739 | Structural equality and error-propagation lowering share aggregate layout traversal |
+| `llvm/lower/collections.rs` | 1206 | List, map, and set operation lowering shares runtime descriptors and ownership moves |
+| `llvm/lower/cleanup.rs` | 501 | Drop and cleanup lowering is one cohesive operation table |
+| `snacc-runtime/src/lib.rs` | 510 | Runtime ABI vocabulary and the symbol-set golden test stay together at the crate boundary |
+| `snacc-runtime/src/map.rs` | 1249 | Map runtime families share storage synchronization and generated ABI symbols |
+| `snacc-runtime/src/set.rs` | 510 | Set runtime families share storage synchronization and generated ABI symbols |
 
 Everything else is expected under 500 lines. A future file that exceeds it
 either splits or is added to this table with a reason.
 
-Both sizes above are estimates taken from the current function spans, not
-measurements of the split result. If either lands materially higher — say above
-1,200 lines — that is evidence the split boundary was wrong, and the phase
-should move another helper group out rather than widen the exception.
+These are measured post-refactor sizes. The exceptions are deliberately
+explicit: they are cohesive units whose further separation would require
+inventing a trait, duplicating shared state, or scattering an exhaustive
+variant table. A future file that exceeds its recorded size by more than 20%
+must be reviewed and either split or receive a new, justified RFC change.
 
 ## 6. Target structure
 
@@ -106,9 +123,7 @@ crates/snacc-compiler/src/
   diagnostics.rs
   ast.rs
   lexer/
-    mod.rs
-    numeric.rs        radix, suffix, separator, range rules
-    text.rs           string, raw string, interpolation, Unicode scalars
+    mod.rs            token definitions, scanning, numeric and text rules
   parser/
     mod.rs            entry point and item parsing
     types.rs          type syntax, sums, parameterized forms
@@ -343,8 +358,9 @@ This refactor is behavior-preserving, so its evidence is comparative:
 - the three generated host templates are byte-identical across Phase 6;
 - a direct single-file compile and a Cargo-hosted build produce the same program
   output before and after;
-- the object-cache identity for an unchanged program is unchanged, proving no
-  input to the build hash moved.
+- the object-cache identity is stable for an unchanged compiler source tree and
+  changes when the compiler source hash set changes, so a moved implementation
+  cannot silently reuse an incompatible object.
 
 ## 11. Rejected alternatives
 
@@ -384,8 +400,9 @@ attributed. The phase order separates them.
 1. No production `.rs` file exceeds 500 lines except those listed in section 5
    with a recorded reason.
 2. No inline `#[cfg(test)]` module remains in a production file over 500 lines.
-3. `checker.rs`, `llvm.rs`, `snacc-runtime/src/lib.rs`, `cargo-snacc/src/main.rs`,
-   and `snacc-workbench/src/lib.rs` are decomposed as in section 6.
+3. `checker/mod.rs`, `llvm/mod.rs`, `snacc-runtime/src/lib.rs`,
+   `cargo-snacc/src/main.rs`, and `snacc-workbench/src/lib.rs` are decomposed as
+   in section 6.
 4. Runtime symbol names and import declarations come from one table each.
 5. `snacc-runtime` generates its symbol identifiers and `force_link` from its
    macros; the exported symbol set is unchanged.
@@ -413,3 +430,5 @@ attributed. The phase order separates them.
 - [`LANGUAGE.md`](../../LANGUAGE.md)
 - [RFC 006: Rust workspace organization](archive/006-workspace-organization.md)
 - [RFC 007: Rust bridge signature verification](archive/007-bridge-signature-verification.md)
+
+

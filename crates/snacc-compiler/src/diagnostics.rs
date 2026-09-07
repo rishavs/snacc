@@ -1,7 +1,7 @@
 use chumsky::prelude::Rich;
 use std::{fmt::Display, ops::Range};
 
-use crate::syntax::ast;
+use crate::ast;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticPhase {

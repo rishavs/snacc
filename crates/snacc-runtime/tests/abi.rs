@@ -199,6 +199,61 @@ fn run(command: &mut Command, what: &str) -> Output {
 /// `crates/snacc-driver` embeds it for the direct workflow.
 const RUNTIME_SOURCE: &str = include_str!("../src/lib.rs");
 
+/// One entry per runtime module beside `lib.rs` (Specification 029 Phase 5).
+/// Probe and host sources compile beside these files so their `mod`
+/// declarations resolve exactly as they do in the Cargo build, mirroring
+/// `crates/snacc-driver`.
+const RUNTIME_MODULES: &[(&str, &str)] = &[
+    ("print.rs", include_str!("../src/print.rs")),
+    ("string.rs", include_str!("../src/string.rs")),
+    ("view.rs", include_str!("../src/view.rs")),
+    ("list.rs", include_str!("../src/list.rs")),
+    ("map.rs", include_str!("../src/map.rs")),
+    ("set.rs", include_str!("../src/set.rs")),
+    ("fail.rs", include_str!("../src/fail.rs")),
+];
+
+/// Locates the `paste` proc-macro artifact the workspace build produced, so
+/// temporary sources can expand the runtime's macros with the same toolchain
+/// that built the test harness. Mirrors the lookup in `crates/snacc-driver`.
+fn paste_library() -> std::path::PathBuf {
+    const EXTENSIONS: &[&str] = if cfg!(windows) {
+        &["dll"]
+    } else if cfg!(target_os = "macos") {
+        &["dylib"]
+    } else {
+        &["so"]
+    };
+    const PREFIX: &str = if cfg!(windows) { "paste-" } else { "libpaste-" };
+    let mut directory = std::env::current_exe().expect("test harness has no executable path");
+    directory.pop();
+    for _ in 0..5 {
+        for candidate in [directory.join("deps"), directory.clone()] {
+            if let Ok(entries) = std::fs::read_dir(&candidate) {
+                let mut hits: Vec<std::path::PathBuf> = entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.starts_with(PREFIX)
+                                    && EXTENSIONS.iter().any(|extension| name.ends_with(extension))
+                            })
+                    })
+                    .collect();
+                hits.sort();
+                if let Some(hit) = hits.into_iter().next() {
+                    return hit;
+                }
+            }
+        }
+        if !directory.pop() {
+            panic!("the workspace's paste artifact is missing; build through Cargo so it exists");
+        }
+    }
+    panic!("the workspace's paste artifact is missing; build through Cargo so it exists");
+}
+
 /// Appended to `RUNTIME_SOURCE` so one compiled probe binary can exercise
 /// any of the eight print symbols by argv, e.g. `probe f64 1.5` or `probe u8 7`.
 /// Calling a `pub extern "C" fn` directly by name (not through an FFI
@@ -234,11 +289,18 @@ fn probe_path() -> &'static Path {
         let source_path = dir.path().join("probe.rs");
         fs::write(&source_path, format!("{RUNTIME_SOURCE}{PROBE_MAIN}"))
             .expect("failed to write probe source");
+        for &(name, source) in RUNTIME_MODULES {
+            fs::write(dir.path().join(name), source)
+                .expect("failed to write runtime module for the probe");
+        }
         let exe_path = dir.path().join(format!("probe{}", env::consts::EXE_SUFFIX));
+        let paste = paste_library();
         run(
             Command::new("rustc")
                 .arg("--edition=2024")
                 .arg(&source_path)
+                .arg("--extern")
+                .arg(format!("paste={}", paste.display()))
                 .arg("-o")
                 .arg(&exe_path),
             "compiling the print-symbol probe",
@@ -411,13 +473,23 @@ fn force_link_retains_all_print_and_allocator_symbols_through_a_real_link() {
 
     // Compile snacc-runtime as a standalone rlib: an ordinary, separately
     // compiled crate, not source-embedded.
-    let runtime_source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let rlib_path = dir.path().join("libsnacc_runtime.rlib");
+    for &(name, source) in RUNTIME_MODULES {
+        fs::write(dir.path().join(name), source)
+            .expect("failed to write runtime module for the rlib build");
+    }
+    // The rlib builds from a copy beside its modules (not the real `src`
+    // directory) so the test never writes into the repository.
+    let rlib_source_path = dir.path().join("lib.rs");
+    fs::write(&rlib_source_path, RUNTIME_SOURCE).expect("failed to stage runtime lib");
+    let paste = paste_library();
     run(
         Command::new("rustc")
             .arg("--edition=2024")
             .arg("--crate-type=lib")
-            .arg(&runtime_source_path)
+            .arg(&rlib_source_path)
+            .arg("--extern")
+            .arg(format!("paste={}", paste.display()))
             .arg("-o")
             .arg(&rlib_path),
         "compiling snacc-runtime as a standalone rlib",
@@ -447,6 +519,17 @@ fn force_link_retains_all_print_and_allocator_symbols_through_a_real_link() {
             .arg(&host_source_path)
             .arg("--extern")
             .arg(format!("snacc_runtime={}", rlib_path.display()))
+            .arg("--extern")
+            .arg(format!("paste={}", paste.display()))
+            // Transitive rlib dependencies (notably the `paste` proc-macro)
+            // resolve through the library search path rather than `--extern`,
+            // so its directory joins the search path as well.
+            .arg("-L")
+            .arg(
+                paste
+                    .parent()
+                    .expect("paste artifact has a parent directory"),
+            )
             .arg("-C")
             .arg(format!("link-arg={}", fake_object_path.display()))
             .arg("-o")
